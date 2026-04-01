@@ -26,8 +26,8 @@ language.
   `switch`, `break_loop`, `continue_loop`, and `box`.
 - Supports circuit composition: `compose`, `to_gate`, `to_instruction`,
   `append`, `inverse`.
-- Exposes a Backend interface with a full `SimulatorBackend` and `IBMBackend`
-  implementation (including a complete transpilation pipeline).
+- Exposes a Backend interface with a full `SimulatorBackend`, `IBMBackend`, and
+  `QBraidBackend` implementation (including a complete transpilation pipeline).
 - Serializes/deserializes circuits to/from **OpenQASM 3** via a public
   Serializer interface.
 - Exposes the underlying Complex and Matrix algebra as public API.
@@ -90,6 +90,7 @@ project-root/
 │   ├── simulator.{ext}        # SimulatorBackend: state-vector simulation engine
 │   ├── transpiler.{ext}       # Transpilation pipeline (decomposition, routing, optimization)
 │   ├── ibm_backend.{ext}      # IBMBackend: transpile + cloud execution
+│   ├── qbraid_backend.{ext}   # QBraidBackend: transpile + cloud execution
 │   ├── bloch.{ext}            # Bloch sphere / qubit state introspection
 │   ├── serializer.{ext}       # Serializer interface + OpenQASM 3 implementation
 │   └── mod.{ext}              # Central re-export hub (public API surface)
@@ -102,6 +103,7 @@ project-root/
 │   ├── simulator.test.{ext}
 │   ├── transpiler.test.{ext}
 │   ├── ibm_backend.test.{ext} # Skipped by default (requires credentials)
+│   ├── qbraid_backend.test.{ext} # Skipped by default (requires credentials)
 │   ├── bloch.test.{ext}
 │   ├── serializer.test.{ext}
 │   └── integration.test.{ext}  # End-to-end quantum circuits
@@ -202,8 +204,16 @@ IBMBackendConfiguration extends BackendConfiguration {
   qubitProperties: map<number, QubitProperties>
   gateProperties: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
   maxCircuits: number | null
-  apiEndpoint: string
+  apiEndpoint: string           // default: "https://quantum.cloud.ibm.com/api/v1"
   apiToken: string
+}
+
+QBraidBackendConfiguration extends BackendConfiguration {
+  qubitProperties: map<number, QubitProperties>
+  gateProperties: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
+  deviceQrn: string             // qBraid Quantum Resource Name (e.g., "qbraid_qir_simulator")
+  apiEndpoint: string           // default: "https://api-v2.qbraid.com/api/v1"
+  apiKey: string                // X-API-KEY header value
 }
 
 QubitProperties {
@@ -1495,11 +1505,12 @@ payload = {
 }
 ```
 
-Construct API configuration:
+Construct API configuration (default endpoint:
+`https://quantum.cloud.ibm.com/api/v1`):
 
 ```
 apiConfig = {
-  "endpoint": configuration.apiEndpoint,
+  "endpoint": configuration.apiEndpoint,  // default: "https://quantum.cloud.ibm.com/api/v1"
   "token": configuration.apiToken,
   "headers": {
     "Authorization": "Bearer " + configuration.apiToken,
@@ -1598,6 +1609,161 @@ Tests that require credentials (skipped by default):
 - Poll status transitions: queued -> running -> completed.
 - Handle failed/cancelled jobs gracefully.
 - End-to-end: build circuit -> transpile -> execute -> verify distribution.
+
+---
+
+### Step 10b: qBraid Backend
+
+**File:** `src/qbraid_backend.{ext}`
+
+Implement `QBraidBackend` that implements the `Backend` interface. This backend
+represents a quantum device accessed via the qBraid cloud API.
+
+#### Constructor
+
+```
+QBraidBackend(configuration: QBraidBackendConfiguration)
+```
+
+#### Properties (from configuration)
+
+- `numQubits`: from configuration.
+- `basisGates`: from configuration.
+- `couplingMap`: from configuration.
+
+#### `transpileAndPackage(circuit) -> QBraidExecutable`
+
+**Phase 1: Build Target Description**
+
+Construct a `Target` from the configuration (identical approach to IBM):
+
+```
+target = new Target()
+target.numQubits = configuration.numQubits
+for each gate in configuration.basisGates:
+  if 1-qubit gate:
+    for each qubit q:
+      add GateProperties(error, duration) for (q,)
+  if 2-qubit gate:
+    for each [q0, q1] in couplingMap:
+      add GateProperties(error, duration) for (q0, q1)
+```
+
+**Phase 2: Compile Circuit**
+
+Use the transpiler module:
+
+1. Decompose all gates to basis gate set (Stage 4).
+2. Layout and routing for coupling map via SABRE (Stages 2-3).
+3. Optimize gate count (Stage 5).
+4. Validate: every gate is in basis, every 2-qubit gate on a connected pair.
+
+**Phase 3: Serialize and Package**
+
+Serialize the compiled circuit to OpenQASM 3 using `OpenQASM3Serializer`.
+
+Construct the full API request payload:
+
+```
+payload = {
+  "shots": configuration.maxShots,
+  "deviceQrn": configuration.deviceQrn,
+  "program": {
+    "format": "qasm3",
+    "data": serializedCircuit
+  },
+  "name": "quantum-sim-job",
+  "tags": {},
+  "runtimeOptions": {}
+}
+```
+
+Construct API configuration (default endpoint:
+`https://api-v2.qbraid.com/api/v1`):
+
+```
+apiConfig = {
+  "endpoint": configuration.apiEndpoint,  // default: "https://api-v2.qbraid.com/api/v1"
+  "apiKey": configuration.apiKey,
+  "headers": {
+    "X-API-KEY": configuration.apiKey,
+    "Content-Type": "application/json"
+  },
+  "routes": {
+    "submit": "/jobs",
+    "status": "/jobs/{job_qrn}",
+    "results": "/jobs/{job_qrn}/result"
+  }
+}
+```
+
+Return:
+
+```
+QBraidExecutable {
+  payload: object              // Complete JSON-serializable job submission body
+  apiConfig: object            // Auth, endpoint, headers, route templates
+  compiledCircuit: QuantumCircuit  // For optional inspection
+  target: Target
+  numClbits: number
+}
+```
+
+#### `execute(executable) -> ExecutionResult`
+
+1. **Submit job:** POST to `endpoint + routes.submit` with payload as body.
+   Response contains a `jobQrn` identifier.
+2. **Poll for completion:** GET `endpoint + routes.status` with URL-encoded
+   `jobQrn`. Handle statuses: "QUEUED", "RUNNING", "COMPLETED", "FAILED",
+   "CANCELLED".
+3. **Retrieve results:** GET `endpoint + routes.results` with URL-encoded
+   `jobQrn`.
+4. **Parse results:** Convert measurement counts to bitstring percentages.
+
+```
+totalShots = sum of all counts
+percentages = {}
+for bitstring, count in response.measurements (or response.counts):
+  percentages[bitstring] = (count / totalShots) * 100
+return percentages
+```
+
+Note: The `jobQrn` must be URL-encoded when used in route paths (use
+`encodeURIComponent` or equivalent).
+
+**Tests (minimum 20):**
+
+qBraid backend tests involve real API calls and require credentials. All qBraid
+backend tests **must be gated behind a skip mechanism** (see Section 9.3).
+
+Tests that can run without credentials (using the transpilation pipeline only):
+
+- Construct `QBraidBackend` with a mock configuration (5-qubit linear chain).
+- `transpileAndPackage` on a Bell state circuit: verify the compiled circuit
+  uses only basis gates.
+- Verify coupling map is respected: all 2-qubit gates on connected pairs.
+- Verify the OpenQASM 3 serialization is valid in the payload.
+- Verify the payload structure: has `shots`, `deviceQrn`, `program.format`,
+  `program.data`.
+- Verify API config has correct headers (`X-API-KEY`), routes.
+- Verify `QBraidExecutable` contains all required fields.
+- Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
+  SWAPs if needed.
+- Transpile for CX-based backend: verify CX gates in output.
+- Transpile for ECR-based backend: verify ECR gates in output.
+- Verify gate direction compliance with asymmetric coupling map.
+- Verify the compiled circuit depth is reasonable (not wildly inflated).
+- Construct Target from configuration: verify all gates/qubits populated.
+
+Tests that require credentials (skipped by default):
+
+- Submit a Bell state job to a real qBraid device and retrieve results.
+- Verify returned percentages sum to 100.
+- Verify bitstring format is correct.
+- Poll status transitions: QUEUED -> RUNNING -> COMPLETED.
+- Handle FAILED/CANCELLED jobs gracefully.
+- End-to-end: build circuit -> transpile -> execute -> verify distribution.
+- List available devices (verify API connectivity).
 
 ---
 
@@ -1791,6 +1957,7 @@ QuantumCircuit
 Backend (interface)
 SimulatorBackend
 IBMBackend
+QBraidBackend
 
 // Bloch
 blochSphere (or as method on QuantumCircuit)
@@ -1812,7 +1979,7 @@ decomposeZYZ, decomposeToRzSx, decomposeKAK
 
 // Types
 Instruction, Condition, CircuitComplexity, BlochCoordinates,
-BackendConfiguration, IBMBackendConfiguration,
+BackendConfiguration, IBMBackendConfiguration, QBraidBackendConfiguration,
 QubitProperties, GateProperties, Target,
 ExecutionResult
 
@@ -1891,7 +2058,8 @@ The README must contain the following sections in order:
 
    - **Backends** — `Backend` interface, `SimulatorBackend` (constructor,
      `execute`, `getStateVector`), `IBMBackend` (constructor, configuration
-     fields, transpilation and execution flow).
+     fields, transpilation and execution flow), `QBraidBackend` (constructor,
+     configuration fields, transpilation and execution flow).
 
    - **Serialization** — `Serializer` interface, `OpenQASM3Serializer`
      (`serialize`, `deserialize`).
@@ -1905,8 +2073,9 @@ The README must contain the following sections in order:
 
    - **Types** — All exported types/interfaces with their fields: `Instruction`,
      `Condition`, `CircuitComplexity`, `BlochCoordinates`,
-     `BackendConfiguration`, `IBMBackendConfiguration`, `QubitProperties`,
-     `GateProperties`, `Target`, `ExecutionResult`.
+     `BackendConfiguration`, `IBMBackendConfiguration`,
+     `QBraidBackendConfiguration`, `QubitProperties`, `GateProperties`,
+     `Target`, `ExecutionResult`.
 
 5. **Usage Examples** — One short, self-contained code example for each of the
    following scenarios:
@@ -1929,8 +2098,8 @@ The README must contain the following sections in order:
      `Matrix` operations (multiply, tensor, dagger).
 
 6. **Running Tests** — The exact command(s) to run the full test suite for the
-   target language, including how to enable the skipped IBM backend tests via
-   environment variables.
+   target language, including how to enable the skipped IBM and qBraid backend
+   tests via environment variables.
 
 7. **License** — MIT.
 
@@ -2000,25 +2169,26 @@ distributions:
 
 ## 9. Test Plan — Complete Specification
 
-The test suite must contain **at minimum 530 tests** organized as follows:
+The test suite must contain **at minimum 550 tests** organized as follows:
 
 ### 9.1 Unit Tests per Module
 
-| Module      | Min Tests                |
-| ----------- | ------------------------ |
-| Types       | 10                       |
-| Complex     | 40                       |
-| Matrix      | 45                       |
-| Gates       | 80                       |
-| Parameter   | 15                       |
-| Circuit     | 40                       |
-| Backend     | 5                        |
-| Simulator   | 60                       |
-| Transpiler  | 40                       |
-| IBM Backend | 20 (partially skippable) |
-| Bloch       | 20                       |
-| Serializer  | 25                       |
-| **Total**   | **400**                  |
+| Module         | Min Tests                |
+| -------------- | ------------------------ |
+| Types          | 10                       |
+| Complex        | 40                       |
+| Matrix         | 45                       |
+| Gates          | 80                       |
+| Parameter      | 15                       |
+| Circuit        | 40                       |
+| Backend        | 5                        |
+| Simulator      | 60                       |
+| Transpiler     | 40                       |
+| IBM Backend    | 20 (partially skippable) |
+| qBraid Backend | 20 (partially skippable) |
+| Bloch          | 20                       |
+| Serializer     | 25                       |
+| **Total**      | **420**                  |
 
 ### 9.2 Integration Tests — Quantum Circuit Verification (minimum 130)
 
@@ -2138,20 +2308,28 @@ verify output distribution matches expectations.
 95. **IBM OpenQASM 3 in payload**: Verify the serialized circuit in the IBM
     payload is valid OpenQASM 3.
 96. **Transpile preserves measurement semantics**: Circuit with mid-circuit
-    measurement -> transpile -> simulate -> same distribution. 97-110.
-    **Generate 14 additional small random circuits** (2-4 qubits, 3-8 gates)
-    using various gate combinations. Compute expected output by manual
-    state-vector calculation or by cross-verifying getStateVector, and check
-    against simulation with 1024 shots. 111-130. **Generate 20 transpilation
-    verification circuits**: For each, build a small circuit (2-3 qubits),
-    transpile it for a mock backend with a constrained coupling map and basis
-    gates, then simulate both the original and transpiled circuit and verify
-    they produce equivalent distributions.
+    measurement -> transpile -> simulate -> same distribution.
+97. **qBraid payload structure**: Build circuit -> transpile via QBraidBackend
+    -> verify payload JSON has correct structure (`shots`, `deviceQrn`,
+    `program.format`, `program.data`).
+98. **qBraid OpenQASM 3 in payload**: Verify the serialized circuit in the
+    qBraid payload is valid OpenQASM 3. 99-112. **Generate 14 additional small
+    random circuits** (2-4 qubits, 3-8 gates) using various gate combinations.
+    Compute expected output by manual state-vector calculation or by
+    cross-verifying getStateVector, and check against simulation with 1024
+    shots. 113-132. **Generate 20 transpilation verification circuits**: For
+    each, build a small circuit (2-3 qubits), transpile it for a mock backend
+    with a constrained coupling map and basis gates, then simulate both the
+    original and transpiled circuit and verify they produce equivalent
+    distributions.
 
-### 9.3 Skippable Tests (IBM Backend)
+### 9.3 Skippable Tests (IBM & qBraid Backends)
 
-Tests that require real IBM credentials or network access **must be gated behind
-a skip mechanism**. The exact mechanism depends on the target language:
+Tests that require real IBM or qBraid credentials or network access **must be
+gated behind a skip mechanism**. The exact mechanism depends on the target
+language:
+
+**IBM Backend:**
 
 | Language   | Mechanism                                                       |
 | ---------- | --------------------------------------------------------------- |
@@ -2160,13 +2338,24 @@ a skip mechanism**. The exact mechanism depends on the target language:
 | Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`       |
 | Go         | `if os.Getenv("IBM_API_TOKEN") == "" { t.Skip(...) }`           |
 
-**Convention:** Define two test categories for IBM backend:
+**qBraid Backend:**
 
-1. **`ibm_transpile` tests**: Test transpilation, payload construction, and
-   serialization using a mock `IBMBackendConfiguration`. These run always.
-2. **`ibm_execute` tests**: Test actual job submission, polling, and result
-   retrieval. These are **skipped by default** and only run when the
-   `IBM_API_TOKEN` and `IBM_API_ENDPOINT` environment variables are set.
+| Language   | Mechanism                                                        |
+| ---------- | ---------------------------------------------------------------- |
+| TypeScript | Check for `QBRAID_API_KEY` env var; skip with `Deno.test` ignore |
+| Python     | `@pytest.mark.skipif(not os.environ.get("QBRAID_API_KEY"), ...)` |
+| Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`        |
+| Go         | `if os.Getenv("QBRAID_API_KEY") == "" { t.Skip(...) }`           |
+
+**Convention:** Define two test categories for each cloud backend:
+
+1. **`ibm_transpile` / `qbraid_transpile` tests**: Test transpilation, payload
+   construction, and serialization using a mock configuration. These run always.
+2. **`ibm_execute` / `qbraid_execute` tests**: Test actual job submission,
+   polling, and result retrieval. These are **skipped by default** and only run
+   when the respective environment variables are set:
+   - IBM: `IBM_API_TOKEN` and `IBM_API_ENDPOINT`
+   - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
 The test runner output must clearly indicate which tests were skipped and why.
 
@@ -2180,8 +2369,8 @@ The test runner output must clearly indicate which tests were skipped and why.
 4. Only then proceed to the next module.
 
 After all modules are complete: 5. Run the full integration test suite. 6. All
-530+ tests must pass before the library is considered complete (excluding
-skipped IBM execution tests).
+550+ tests must pass before the library is considered complete (excluding
+skipped IBM and qBraid execution tests).
 
 ---
 
@@ -2225,6 +2414,7 @@ Before declaring the library done, verify:
 - [ ] `Backend` interface defined.
 - [ ] `SimulatorBackend` implements `Backend` interface.
 - [ ] `IBMBackend` implements `Backend` interface.
+- [ ] `QBraidBackend` implements `Backend` interface.
 - [ ] Transpiler pipeline fully implemented: unroll, synthesis, layout (SABRE),
       routing (SABRE), translation (ZYZ, RZ+SX, KAK), optimization.
 - [ ] ZYZ decomposition correctly decomposes any single-qubit unitary.
@@ -2236,14 +2426,20 @@ Before declaring the library done, verify:
       removal, commutation).
 - [ ] IBM payload structure matches specification (program_id, backend, pubs).
 - [ ] IBM executable contains API config with auth headers and route templates.
+- [ ] qBraid payload structure matches specification (shots, deviceQrn,
+      program).
+- [ ] qBraid executable contains API config with X-API-KEY header and route
+      templates.
 - [ ] Transpiled circuits produce equivalent measurement distributions to
       original circuits when simulated.
 - [ ] IBM execution tests exist and are gated behind `IBM_API_TOKEN` env var.
+- [ ] qBraid execution tests exist and are gated behind `QBRAID_API_KEY` env
+      var.
 - [ ] Complex class has all methods, fully tested.
 - [ ] Matrix class has all methods, fully tested.
 - [ ] Gate matrices are all verified unitary.
 - [ ] No external math/LA dependencies.
-- [ ] 530+ tests passing (excluding skipped IBM execution tests).
+- [ ] 550+ tests passing (excluding skipped IBM and qBraid execution tests).
 - [ ] All public API symbols exported from mod.{ext}.
 - [ ] `README.md` exists with: installation, quick start (Bell state example),
       full public API reference for every exported symbol, 10 usage examples
@@ -2255,16 +2451,19 @@ Before declaring the library done, verify:
 
 ## 11. What is NOT Tested (but IS Implemented)
 
-The IBM backend (`IBMBackend`) is **fully implemented** including transpilation,
-OpenQASM 3 serialization, payload construction, job submission, polling, and
-result retrieval. However, the **execution path** (actual HTTP calls to the IBM
-cloud API) **cannot be tested without credentials**. These tests are gated
-behind `IBM_API_TOKEN` and `IBM_API_ENDPOINT` environment variables and are
-skipped by default.
+The IBM backend (`IBMBackend`) and qBraid backend (`QBraidBackend`) are **fully
+implemented** including transpilation, OpenQASM 3 serialization, payload
+construction, job submission, polling, and result retrieval. However, the
+**execution paths** (actual HTTP calls to the IBM and qBraid cloud APIs)
+**cannot be tested without credentials**. These tests are gated behind
+environment variables and are skipped by default:
+
+- IBM: `IBM_API_TOKEN` and `IBM_API_ENDPOINT`
+- qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
 Everything else — transpilation pipeline, payload construction, OpenQASM 3
-serialization within the IBM flow, coupling map handling — **is tested** using
-mock configurations.
+serialization within both backend flows, coupling map handling — **is tested**
+using mock configurations.
 
 ## 12. Out of Scope
 
@@ -2274,9 +2473,9 @@ The following are explicitly out of scope:
   simulator.
 - **Scheduling**: Gate timing and delay scheduling are not simulated (delay is a
   no-op).
-- **Additional hardware backends** beyond IBM: The `Backend` interface allows
-  users to implement their own, but only `SimulatorBackend` and `IBMBackend` are
-  provided.
+- **Additional hardware backends** beyond IBM and qBraid: The `Backend`
+  interface allows users to implement their own, but only `SimulatorBackend`,
+  `IBMBackend`, and `QBraidBackend` are provided.
 
 ---
 
