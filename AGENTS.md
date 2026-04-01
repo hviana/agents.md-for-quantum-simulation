@@ -63,6 +63,11 @@ that the simulation engine is self-contained.
   n-qubit system, the state vector index `j` encodes qubit `k` as bit `k` of
   `j`. For example, in a 3-qubit system, index 5 = binary 101 means qubit 0 = 1,
   qubit 1 = 0, qubit 2 = 1.
+- Gate matrix ordering is **MSB-first**: in an m-qubit gate matrix, bit `(m-1)`
+  of the row/column index corresponds to the first qubit argument, bit `(m-2)`
+  to the second, and so on. For example, in a 2-qubit gate `G(control, target)`,
+  the 4x4 matrix index has bit 1 = control, bit 0 = target. In a 3-qubit gate
+  `G(ctrl1, ctrl2, target)`, bit 2 = ctrl1, bit 1 = ctrl2, bit 0 = target.
 
 ---
 
@@ -565,13 +570,13 @@ Below are the explicit matrices for every two-qubit gate:
 
 ```
 [[1, 0, 0, 0],
- [0, exp(i*gamma)*cos(th/2), 0, -exp(i*(gamma+l))*sin(th/2)],
- [0, 0, 1, 0],
- [0, exp(i*(gamma+ph))*sin(th/2), 0, exp(i*(gamma+ph+l))*cos(th/2)]]
+ [0, 1, 0, 0],
+ [0, 0, exp(i*gamma)*cos(th/2), -exp(i*(gamma+l))*sin(th/2)],
+ [0, 0, exp(i*(gamma+ph))*sin(th/2), exp(i*(gamma+ph+l))*cos(th/2)]]
 ```
 
-Note: row/col ordering follows little-endian convention. The identity acts on
-the |00>,|10> subspace (control=0), and the U matrix acts on the |01>,|11>
+Note: MSB-first ordering. Bit 1 = control, bit 0 = target. The identity acts on
+the |00>,|01> subspace (control=0), and the U matrix acts on the |10>,|11>
 subspace (control=1).
 
 **CU1(l):** Same as CP(l).
@@ -646,11 +651,14 @@ subspace (control=1).
 
 **CCZ (8x8):** Identity except `entry [7][7] = -1`.
 
-**CSWAP (8x8):** Identity except it swaps entries [3] and [5]:
-`row 3: [0,0,0,0,0,1,0,0]`, `row 5: [0,0,0,1,0,0,0,0]`.
+**CSWAP (8x8):** Identity except it swaps entries [5] and [6] (MSB-first:
+bit2=control, bit1=target1, bit0=target2; when control=1, swap target1 and
+target2, i.e. indices 5=101 and 6=110): `row 5: [0,0,0,0,0,0,1,0]`,
+`row 6: [0,0,0,0,0,1,0,0]`.
 
-**RCCX (8x8):** Identity except: `entry [3][3] = 0, entry [3][7] = -i`,
-`entry [5][5] = -1`, `entry [7][7] = 0, entry [7][3] = i`.
+**RCCX (8x8):** Identity except (MSB-first: bit2=ctrl1, bit1=ctrl2,
+bit0=target): `entry [5][5] = -1`, `entry [6][6] = 0, entry [6][7] = -i`,
+`entry [7][7] = 0, entry [7][6] = i`.
 
 #### Four-Qubit Gates (return 16x16 Matrix)
 
@@ -664,9 +672,10 @@ subspace (control=1).
 
 **C3SX (16x16):** Identity except rows/cols 14,15 where SX is applied.
 
-**RCCCX (16x16):** Identity except: `entry [3][3] = i`,
-`entry [7][7] -> maps |0111> to |1111>`, `entry [11][11] = -i`,
-`entry [15][15] -> maps |1111> to |0111> (negated)`.
+**RCCCX (16x16):** Identity except (MSB-first: bit3=ctrl1, bit2=ctrl2,
+bit1=ctrl3, bit0=target): `entry [12][12] = i`, `entry [13][13] = -i`,
+`entry [14][14] = 0, entry [14][15] = 1`,
+`entry [15][15] = 0, entry [15][14] = -1`.
 
 #### Multi-Controlled Gates (variable number of controls)
 
