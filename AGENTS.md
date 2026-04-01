@@ -18,7 +18,7 @@ language.
 
 - Builds quantum circuits declaratively via a builder/chaining API.
 - Simulates them shot-by-shot using state-vector math (Born rule measurement).
-- Returns measurement outcome counts (bitstring histograms).
+- Returns measurement outcome percentages (bitstring histograms).
 - Provides introspection (state vectors, Bloch sphere coordinates, circuit
   complexity metrics).
 - Supports symbolic parameters with arithmetic expressions, bound at run time.
@@ -223,7 +223,7 @@ Target {
   gates: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
 }
 
-ExecutionResult = map<string, number>  // bitstring -> count
+ExecutionResult = map<string, number>  // bitstring -> percentage (0-100, e.g. { "00": 50, "11": 50 })
 
 SerializedCircuit = string  // OpenQASM 3 program text
 ```
@@ -236,7 +236,7 @@ SerializedCircuit = string  // OpenQASM 3 program text
 - Verify BlochCoordinates struct field ranges.
 - Verify BackendConfiguration creation with and without coupling map.
 - Edge cases: 0 qubits, 0 classical bits, empty instructions list.
-- Verify ExecutionResult summing to expected shot count.
+- Verify ExecutionResult percentages summing to 100.
 - Type validation edge cases.
 
 ---
@@ -1154,8 +1154,10 @@ For circuits with measurements only at the end (no mid-circuit measurements):
 For mid-circuit measurements: Run the full simulation `numShots` times
 independently.
 
-**Return value:** Dictionary mapping bitstrings to counts. Bitstrings are
-ordered with qubit 0 as rightmost bit. Sum of counts = numShots.
+**Return value:** Dictionary mapping bitstrings to percentages (0-100).
+Bitstrings are ordered with qubit 0 as rightmost bit. Sum of percentages = 100.
+For example, a Bell state result would be `{ "00": 50, "11": 50 }`. Percentages
+are computed from shot counts: `percentage = (count / numShots) * 100`.
 
 #### Additional Public Methods
 
@@ -1165,11 +1167,11 @@ ordered with qubit 0 as rightmost bit. Sum of counts = numShots.
 
 **Tests (minimum 60):**
 
-- Simulate `X|0>` -> measure -> 100% "1".
-- Simulate `H|0>` -> measure -> ~50% "0", ~50% "1" (within tolerance over 4096
-  shots).
-- Bell state `H(0), CX(0,1)` -> ~50% "00", ~50% "11".
-- GHZ state `H(0), CX(0,1), CX(0,2)` -> ~50% "000", ~50% "111".
+- Simulate `X|0>` -> measure -> `{ "1": 100 }`.
+- Simulate `H|0>` -> measure -> ~`{ "0": 50, "1": 50 }` (within tolerance over
+  4096 shots).
+- Bell state `H(0), CX(0,1)` -> ~`{ "00": 50, "11": 50 }`.
+- GHZ state `H(0), CX(0,1), CX(0,2)` -> ~`{ "000": 50, "111": 50 }`.
 - `getStateVector` for `H|0>` ~ `[1/sqrt(2), 1/sqrt(2)]`.
 - `getStateVector` for Bell state ~ `[1/sqrt(2), 0, 0, 1/sqrt(2)]`.
 - Every single-qubit gate applied to |0>: verify `getStateVector` matches gate's
@@ -1531,14 +1533,16 @@ IBMExecutable {
    statuses: "queued", "running", "completed", "failed", "cancelled".
 3. **Retrieve results:** GET `endpoint + routes.results`.
 4. **Parse results:** API returns hex keys (`{"0x0": 502, "0x7": 522}`). Convert
-   to binary bitstrings using `numClbits` for padding.
+   to binary bitstrings using `numClbits` for padding, then convert counts to
+   percentages.
 
 ```
-counts = {}
+totalShots = sum of all counts
+percentages = {}
 for hex_key, count in response.results[0].data.counts:
   bitstring = hexToBinary(hex_key, executable.numClbits)
-  counts[bitstring] = count
-return counts
+  percentages[bitstring] = (count / totalShots) * 100
+return percentages
 ```
 
 #### Coupling Map Details
@@ -1589,7 +1593,7 @@ Tests that can run without credentials (using the transpilation pipeline only):
 Tests that require credentials (skipped by default):
 
 - Submit a Bell state job to a real IBM backend and retrieve results.
-- Verify returned counts sum to numShots.
+- Verify returned percentages sum to 100.
 - Verify bitstring format is correct.
 - Poll status transitions: queued -> running -> completed.
 - Handle failed/cancelled jobs gracefully.
@@ -1961,9 +1965,10 @@ For tests comparing simulation results against expected probability
 distributions:
 
 - Use `numShots = 4096` (or 8192 for tighter bounds).
-- Allow +/-5% tolerance on each probability bucket.
-- Example: if expected is 50%/50%, accept 45%-55% for each.
-- For deterministic circuits (e.g., X|0> -> 100% "1"), use exact comparison.
+- Allow +/-5 tolerance on each percentage value.
+- Example: if expected is `{ "00": 50, "11": 50 }`, accept 45-55 for each.
+- For deterministic circuits (e.g., X|0> -> `{ "1": 100 }`), use exact
+  comparison.
 
 ### Classical Bit Ordering
 
@@ -2022,13 +2027,14 @@ verify output distribution matches expectations.
 
 **Required circuits (implement ALL):**
 
-1. **Identity circuit**: N qubits, no gates, measure all -> 100% "000...0".
-2. **Single X gate**: `X(0)` -> 100% "1".
-3. **Double X gate**: `X(0), X(0)` -> 100% "0" (X^2 = I).
-4. **Hadamard**: `H(0)` -> ~50/50.
-5. **Bell state**: `H(0), CX(0,1)` -> ~50% "00", ~50% "11".
-6. **Reverse Bell**: `H(0), CX(0,1), CX(0,1), H(0)` -> 100% "00".
-7. **GHZ-3**: `H(0), CX(0,1), CX(0,2)` -> ~50% "000", ~50% "111".
+1. **Identity circuit**: N qubits, no gates, measure all ->
+   `{ "000...0": 100 }`.
+2. **Single X gate**: `X(0)` -> `{ "1": 100 }`.
+3. **Double X gate**: `X(0), X(0)` -> `{ "0": 100 }` (X^2 = I).
+4. **Hadamard**: `H(0)` -> ~`{ "0": 50, "1": 50 }`.
+5. **Bell state**: `H(0), CX(0,1)` -> ~`{ "00": 50, "11": 50 }`.
+6. **Reverse Bell**: `H(0), CX(0,1), CX(0,1), H(0)` -> `{ "00": 100 }`.
+7. **GHZ-3**: `H(0), CX(0,1), CX(0,2)` -> ~`{ "000": 50, "111": 50 }`.
 8. **GHZ-4**: extend to 4 qubits.
 9. **Superposition on all qubits**: `H` on all N qubits -> uniform distribution.
 10. **SWAP test**: prepare |01>, SWAP -> |10>.
