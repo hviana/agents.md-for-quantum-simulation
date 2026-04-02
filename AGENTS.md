@@ -19,6 +19,9 @@ language.
 - Builds quantum circuits declaratively via a builder/chaining API.
 - Simulates them shot-by-shot using state-vector math (Born rule measurement).
 - Returns measurement outcome percentages (bitstring histograms).
+- Supports ordered, named classical registers and preserves them through circuit
+  construction, serialization, transpilation, simulation, and backend result
+  parsing.
 - Provides introspection (state vectors, Bloch sphere coordinates, circuit
   complexity metrics).
 - Supports symbolic parameters with arithmetic expressions, bound at run time.
@@ -159,23 +162,37 @@ Define all shared types/interfaces. The exact representation depends on the
 target language; the semantic content must match.
 
 ```
+ClassicalRegister {
+  name: string
+  size: number
+  start: number               // Starting flat classical-bit index in concatenated register order
+}
+
+ClassicalBitRef {
+  register: string            // Classical register name
+  index: number               // Bit index within that register
+  flatIndex: number           // Derived absolute classical-bit index
+}
+
 Instruction {
   operation: string            // Gate/operation name (lowercase): "h", "cx", "measure", etc.
   qubits: number[]             // Qubit indices this operation acts on
-  clbits: number[]             // Classical bit indices (for measure, control flow)
+  clbits: number[]             // Flat classical-bit indices in concatenated register order
+  clbitRefs: ClassicalBitRef[] // Named classical-bit references aligned with clbits; empty when unused
   params: (number | Param)[]   // Numeric or symbolic parameters (angles)
   condition?: Condition        // Classical condition (for if_test)
   label?: string               // Optional label for custom gates
 }
 
 Condition {
-  register: number | number[]  // Classical bit index or register indices
+  register: number | number[] | string | string[]  // Flat bit index/indices or named register(s) in declared order
   value: number                // Integer value to compare against
 }
 
 CircuitComplexity {
   numQubits: number
   numClbits: number
+  numClassicalRegisters: number
   depth: number
   totalOperations: number
   operationsByName: map<string, number>
@@ -235,10 +252,14 @@ Target {
   gates: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
 }
 
-ExecutionResult = map<string, number>  // bitstring -> percentage (0-100, e.g. { "00": 50, "11": 50 })
+ExecutionResult = map<string, number>  // bitstring -> percentage (0-100); if multiple classical registers exist, flatten by concatenating register segments in declared order
 
 SerializedCircuit = string  // OpenQASM 3 program text
 ```
+
+The circuit model must preserve `ClassicalRegister[]` in declaration order. Flat
+classical-bit indices are a derived view obtained by concatenating those
+registers in order, then the bits within each register in ascending local index.
 
 Shot count is a **per-execution / per-submitted-job input**, not a backend
 capability field. Do not store it on `BackendConfiguration`; carry it in the
@@ -247,16 +268,21 @@ payload.
 
 **Tests (minimum 10):**
 
-- Verify Instruction creation with all fields populated.
-- Verify Condition with single bit and multi-bit register.
-- Verify CircuitComplexity struct defaults and field types.
+- Verify `ClassicalRegister` creation, flat offsets, and declaration order.
+- Verify `ClassicalBitRef` creation and flat-index mapping.
+- Verify Instruction creation with flat `clbits` and named `clbitRefs`.
+- Verify Condition with single bit, multi-bit register, and named register.
+- Verify CircuitComplexity struct defaults and field types, including
+  `numClassicalRegisters`.
 - Verify BlochCoordinates struct field ranges.
 - Verify BackendConfiguration creation with and without coupling map.
 - Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and
   exactly one of `bearerToken` or `apiKey`.
 - Verify shot count is modeled as a per-execution/per-job input rather than a
   `BackendConfiguration` field.
-- Edge cases: 0 qubits, 0 classical bits, empty instructions list.
+- Verify total `numClbits` equals the sum of named classical register sizes.
+- Edge cases: 0 qubits, 0 classical bits, empty instructions list, empty
+  classical-register list.
 - Verify ExecutionResult percentages summing to 100.
 - Type validation edge cases.
 
@@ -848,9 +874,15 @@ Implement the `QuantumCircuit` class.
 QuantumCircuit(globalPhase = 0)
 ```
 
-Qubits and classical bits are allocated **implicitly**: when a gate references
-qubit index N, all qubits 0..N are automatically allocated if they do not yet
-exist. Same for classical bits.
+Qubits are allocated **implicitly**: when a gate references qubit index N, all
+qubits 0..N are automatically allocated if they do not yet exist.
+
+Classical memory is modeled as an ordered list of named `ClassicalRegister`
+definitions plus a derived flat-index view. The circuit must preserve register
+names, sizes, and declaration order end to end. If the user references only flat
+classical-bit indices and never declares a named classical register, materialize
+those bits into one default register (for example `c`) so the register structure
+still exists for serialization and backend result parsing.
 
 #### Gate Methods — ALL must be implemented
 
@@ -947,7 +979,12 @@ chaining). Angle parameters accept `number | Param`.
 
 **Non-Unitary Operations:**
 
-- `qc.measure(qubit, clbit)`
+- `qc.addClassicalRegister(name, size)` — append a named classical register and
+  return its metadata/reference.
+- `qc.measure(qubit, clbit)` — measure into a classical bit identified either by
+  flat index or by `{ register, index }` in the target language's idiomatic
+  representation. Stored instructions must retain both the flat index and the
+  named-register reference.
 - `qc.reset(qubit)`
 - `qc.barrier(...qubits)` — optimization fence, no state effect
 - `qc.delay(duration, qubit, unit)` — no-op in simulation
@@ -955,7 +992,9 @@ chaining). Angle parameters accept `number | Param`.
 **Control Flow:**
 
 - `qc.ifTest(condition, trueBody, falseBody?)` — conditional execution.
-  `condition` is `{register, value}`. Bodies are `QuantumCircuit` instances.
+  `condition` is `{register, value}`, where `register` may be a flat classical
+  bit selection or a named classical register selection. Bodies are
+  `QuantumCircuit` instances.
 - `qc.forLoop(indexSet, loopParam, body)` — iterate over integer values.
 - `qc.whileLoop(condition, body)` — repeat while condition is true.
 - `qc.switch(target, cases)` — multi-way branch with `{value, body}` pairs and
@@ -973,6 +1012,11 @@ chaining). Angle parameters accept `number | Param`.
 - `qc.append(operation, qubitIndices, clbitIndices)` — low-level append.
 - `qc.inverse()` — return new circuit with reversed, daggered gates. Negated
   global phase. Only unitary circuits.
+
+Low-level append, compose, inversion, and parameter binding must preserve the
+ordered `ClassicalRegister[]` metadata and every instruction's named classical
+bit references. Do **not** collapse multiple named registers into one anonymous
+bit array during any circuit transformation.
 
 **Informational:**
 
@@ -1001,12 +1045,17 @@ chaining). Angle parameters accept `number | Param`.
 - Build a circuit with every single gate type and verify instruction count.
 - Verify chaining: `qc.h(0).cx(0,1).measure(0,0)`.
 - Verify implicit qubit allocation: using qubit 5 allocates qubits 0-5.
-- Verify implicit classical bit allocation.
+- Verify implicit classical bit allocation materializes a default named
+  register.
+- Verify named classical register declaration and insertion order are preserved.
+- Verify measurement into a named register bit stores both flat and named
+  classical-bit references.
 - Verify `run()` with symbolic parameters replaces correctly.
 - Verify `run()` partial binding leaves unbound params symbolic.
 - Verify `complexity()` returns correct depth, operation counts.
 - Verify `inverse()` reverses and daggers gates.
-- Verify `compose()` maps qubits and clbits correctly.
+- Verify `compose()` maps qubits and clbits correctly and preserves/remaps
+  classical-register structure in order.
 - Verify `toGate()` and `toInstruction()`.
 - Verify control flow instructions are stored correctly.
 - Verify `barrier()` and `delay()` are stored but don't affect state.
@@ -1090,7 +1139,9 @@ This is the core simulation engine.
 
 1. Initialize state vector to `|0...0> = [1, 0, 0, ..., 0]` (length
    `2^numQubits`).
-2. Initialize classical register to all zeros (length `numClbits`).
+2. Initialize classical memory to all zeros using the circuit's ordered named
+   classical registers. Maintain both the ordered register layout and the
+   derived flat classical-bit array (length `numClbits`).
 3. Apply the circuit's global phase at the end (multiply all amplitudes by
    `exp(i * globalPhase)`).
 4. For each instruction in order: a. If it's a control flow operation
@@ -1155,8 +1206,10 @@ is needed for `getStateVector` correctness.)
 **Control Flow:**
 
 - `if_test`: Evaluate the classical condition (compare classical register value
-  against the condition value). If true, simulate `trueBody` on current state.
-  If false and `falseBody` exists, simulate it.
+  against the condition value). Conditions may reference flat classical bits or
+  named classical registers, but the integer comparison must use the preserved
+  register ordering. If true, simulate `trueBody` on current state. If false and
+  `falseBody` exists, simulate it.
 - `for_loop`: For each value in `indexSet`, bind the loop parameter (if any),
   simulate the body. Handle `breakLoop` and `continueLoop`.
 - `while_loop`: Evaluate condition, simulate body, repeat. Handle
@@ -1180,9 +1233,13 @@ For mid-circuit measurements: Run the full simulation `numShots` times
 independently.
 
 **Return value:** Dictionary mapping bitstrings to percentages (0-100).
-Bitstrings are ordered with qubit 0 as rightmost bit. Sum of percentages = 100.
-For example, a Bell state result would be `{ "00": 50, "11": 50 }`. Percentages
-are computed from shot counts: `percentage = (count / numShots) * 100`.
+Bitstrings are built from the classical memory, not directly from qubit order:
+concatenate each classical register's bitstring in declared register order, and
+within each register treat local bit 0 as the rightmost bit. Sum of percentages
+= 100. For example, a Bell state result would be `{ "00": 50,
+"11": 50 }`.
+Percentages are computed from shot counts:
+`percentage = (count / numShots) * 100`.
 
 #### Additional Public Methods
 
@@ -1213,6 +1270,8 @@ are computed from shot counts: `percentage = (count / numShots) * 100`.
 - `while_loop`: measure until |1>.
 - `switch`: branch on classical register value.
 - Reset: after `X(0), reset(0)`, qubit 0 should be |0>.
+- Multi-register circuit: verify final histogram concatenates named classical
+  registers in declaration order.
 - SWAP gate: verify qubits are exchanged.
 - Toffoli gate: verify truth table across all 8 basis states.
 - CY, CZ, CH: verify on various input states.
@@ -1510,7 +1569,10 @@ Use the transpiler module:
 
 **Phase 3: Serialize and Package**
 
-Serialize the compiled circuit to OpenQASM 3 using `OpenQASM3Serializer`.
+Serialize the compiled circuit to OpenQASM 3 using `OpenQASM3Serializer`. The
+serializer must emit every named classical register declaration separately and
+in compiled-circuit order. Do **not** collapse multiple classical registers into
+one synthetic `bit[M]` declaration when targeting IBM Sampler V2.
 
 Construct the full API request payload using the current Sampler V2 PUB tuple
 format:
@@ -1593,6 +1655,7 @@ IBMExecutable {
   payload: object              // Complete JSON-serializable job submission body
   apiConfig: object            // Auth, endpoint, headers, route templates
   compiledCircuit: QuantumCircuit  // For optional inspection
+  classicalRegisters: ClassicalRegister[]  // Ordered named classical-register layout used for Sampler V2 result reconstruction
   target: Target
   numClbits: number
 }
@@ -1630,7 +1693,7 @@ IBMExecutable {
 ```
 pubResults = response.results or []
 sampleCounts = {}
-orderedRegisters = getClassicalRegistersInCircuitOrder(executable.compiledCircuit)
+orderedRegisters = executable.classicalRegisters
 
 for pubResult in pubResults:
   data = pubResult.data or {}
@@ -1646,6 +1709,9 @@ for pubResult in pubResults:
     raise result parsing error
 
   shotCount = number of samples in first register
+  for (_, _, samples) in registerEntries:
+    if number of samples != shotCount:
+      raise result parsing error
   for shotIndex in range(shotCount):
     bitstring = combineRegisterSamplesInRegisterOrder(
       registerEntries,
@@ -1694,7 +1760,8 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - `transpileAndPackage` on a Bell state circuit: verify the compiled circuit
   uses only basis gates.
 - Verify coupling map is respected: all 2-qubit gates on connected pairs.
-- Verify the OpenQASM 3 serialization is valid in the payload.
+- Verify the OpenQASM 3 serialization is valid in the payload and preserves
+  named classical-register declarations in order.
 - Verify the payload structure: has `program_id`, `backend`, `params.version`
   (`2` or `"2"`), and Sampler V2 PUB tuples in `params.pubs` whose third element
   is the submitted job's `shots` value.
@@ -1703,15 +1770,19 @@ Tests that can run without credentials (using the transpilation pipeline only):
   expose the IAM token endpoint, and include the required headers
   (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`, `IBM-API-Version`)
   plus routes.
-- Verify `IBMExecutable` contains all required fields.
+- Verify `IBMExecutable` contains all required fields, including ordered named
+  classical-register metadata for result reconstruction.
 - Verify polling logic accepts status from either `status` or `state.status` and
   handles the real capitalized API values ("Queued", "Running", "Completed",
   "Failed", "Cancelled").
 - Verify Sampler V2 result parsing dynamically detects all classical register
   names, preserves compiled-circuit register order, rebuilds the final histogram
   by reconstructing each shot from all `results[0].data.<register>.samples`
-  payloads, and does not assume a hardcoded `data.meas.samples`, a
-  single-register shortcut, or a legacy `data.counts` field.
+  payloads in that order, and does not assume a hardcoded `data.meas.samples`,
+  `data.c.samples`, a single-register shortcut, or a legacy `data.counts` field.
+- Verify mock multi-register IBM results (for example `alpha` + `beta`) are
+  recombined into final bitstrings using executable register metadata rather
+  than the lexical order of JSON keys.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for ECR-based backend: verify ECR gates in output.
@@ -2024,30 +2095,32 @@ Produces a valid OpenQASM 3 program:
 OPENQASM 3.0;
 include "stdgates.inc";
 qubit[N] q;
-bit[M] c;
+bit[1] flag;
+bit[1] data;
 
 // Gate instructions
 rz(1.5708) q[0];
 sx q[0];
 cx q[0], q[1];
-c[0] = measure q[0];
+flag[0] = measure q[0];
+data[0] = measure q[1];
 reset q[1];
 barrier q[0], q[1];
 delay[100ns] q[2];
 gphase(0.7854);
 
 // Control flow
-if (c[0] == 1) {
+if (flag[0] == 1) {
   x q[1];
 }
-while (c[0] == 0) {
+while (flag[0] == 0) {
   h q[0];
-  c[0] = measure q[0];
+  flag[0] = measure q[0];
 }
 for int i in {0, 1, 2} {
   rz(i * 0.5) q[0];
 }
-switch (c) {
+switch (data) {
   case 0: { x q[0]; }
   default: { h q[0]; }
 }
@@ -2058,17 +2131,22 @@ switch (c) {
 - First line: `OPENQASM 3.0;`
 - Second line: `include "stdgates.inc";`
 - `qubit[N] q;` declares N qubits
-- `bit[M] c;` declares M classical bits
+- `bit[M] name;` declares one named classical register
+- Emit one `bit[...] name;` declaration per classical register in circuit order.
+  If a circuit contains multiple named classical registers, preserve them as
+  separate declarations; do **not** merge them into a single synthetic register
+  during serialization.
 - Gate format: `gate_name(params) qubit_args;`
   - Parameterized: `rz(1.5708) q[0];`
   - No params: `sx q[0];`
   - Two-qubit: `cx q[0], q[1];`
-- Measurement: `c[i] = measure q[j];`
+- Measurement: `name[i] = measure q[j];`
 - Reset: `reset q[j];`
 - Barrier: `barrier q[0], q[1], q[2];` (or `barrier q;` for all)
 - Delay: `delay[100ns] q[0];`
 - Global phase: `gphase(0.7854);`
-- Control flow: `if`, `while`, `for`, `switch` with braces
+- Control flow: `if`, `while`, `for`, `switch` with braces; register references
+  must preserve the original classical-register names
 - Parameters are decimal floating-point numbers
 - Symbolic parameters remain as names in the output
 
@@ -2077,7 +2155,8 @@ switch (c) {
 Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
 
 - Header parsing (`OPENQASM 3.0;`, `include` directives)
-- Qubit and classical bit declarations
+- Qubit declarations and multiple named classical-register declarations in
+  source order
 - All gate instructions with parameters
 - Measurement, reset, barrier, delay
 - Global phase (`gphase`)
@@ -2091,8 +2170,10 @@ Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
 - Serialize a circuit with every gate type, verify output format.
 - Deserialize a hand-written OpenQASM 3 program, verify circuit.
 - Verify header format (`OPENQASM 3.0;`, `include`, declarations).
+- Verify multiple named classical registers serialize as separate `bit[...]`
+  declarations in circuit order.
 - Verify gate parameter formatting (decimal, correct precision).
-- Verify measurement format: `c[i] = measure q[j];`.
+- Verify measurement format: `name[i] = measure q[j];`.
 - Verify reset format: `reset q[j];`.
 - Verify barrier format.
 - Verify delay format with units.
@@ -2107,7 +2188,8 @@ Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
 - Parameterized gates serialize angle values correctly.
 - Simulate the deserialized circuit and verify same result as original.
 - Empty circuit serializes correctly.
-- Complex circuit (Bell state + measurement) round-trip.
+- Complex circuit with multiple named classical registers round-trip.
+- Deserialize preserves classical-register names and declaration order.
 - Parse comments in OpenQASM 3 source.
 
 ---
@@ -2147,10 +2229,11 @@ layoutSABRE, routeSABRE, translateToBasis, optimize,
 decomposeZYZ, decomposeToRzSx, decomposeKAK
 
 // Types
+ClassicalRegister, ClassicalBitRef,
 Instruction, Condition, CircuitComplexity, BlochCoordinates,
 BackendConfiguration, IBMBackendConfiguration, QBraidBackendConfiguration,
 QubitProperties, GateProperties, Target,
-ExecutionResult
+ExecutionResult, SerializedCircuit
 
 // Gate constructors (all of them)
 globalPhaseGate,
@@ -2240,11 +2323,11 @@ The README must contain the following sections in order:
    - **Bloch Sphere** — `blochSphere` function / method, `BlochCoordinates`
      fields.
 
-   - **Types** — All exported types/interfaces with their fields: `Instruction`,
-     `Condition`, `CircuitComplexity`, `BlochCoordinates`,
-     `BackendConfiguration`, `IBMBackendConfiguration`,
-     `QBraidBackendConfiguration`, `QubitProperties`, `GateProperties`,
-     `Target`, `ExecutionResult`.
+   - **Types** — All exported types/interfaces with their fields:
+     `ClassicalRegister`, `ClassicalBitRef`, `Instruction`, `Condition`,
+     `CircuitComplexity`, `BlochCoordinates`, `BackendConfiguration`,
+     `IBMBackendConfiguration`, `QBraidBackendConfiguration`, `QubitProperties`,
+     `GateProperties`, `Target`, `ExecutionResult`, `SerializedCircuit`.
 
 5. **Usage Examples** — One short, self-contained code example for each of the
    following scenarios:
@@ -2310,10 +2393,16 @@ distributions:
 
 ### Classical Bit Ordering
 
-- Classical register is an array of bits indexed from 0.
-- Output bitstring: qubit 0 is the **rightmost** bit.
-- For `if_test` condition comparison: the classical register's integer value is
-  computed from the bits (bit 0 is least significant).
+- Classical memory is an ordered list of named registers. Each register is an
+  array of bits indexed from 0.
+- Flat classical-bit indices are derived by concatenating registers in
+  declaration order, then bits within each register in ascending local index.
+- Output bitstrings are built from classical registers, not directly from
+  qubits: concatenate each register's bitstring in declaration order, with local
+  bit 0 as the **rightmost** bit inside its register segment.
+- For `if_test` condition comparison: flatten the referenced bits/registers
+  using that same ordering, then interpret the rightmost bit as least
+  significant.
 
 ---
 
@@ -2455,7 +2544,8 @@ verify output distribution matches expectations.
 83. **complexity()**: Verify correct depth and gate counts for known circuit.
 84. **blochSphere()**: Verify for |0>, |+>, Bell state qubit.
 85. **Round-trip serialization**: Build -> serialize to OpenQASM 3 ->
-    deserialize -> simulate -> compare results.
+    deserialize -> simulate -> compare results, including circuits with multiple
+    named classical registers.
 86. **OpenQASM 3 with control flow**: Serialize/deserialize circuit with
     if_test, simulate.
 87. **Transpile Bell state for 5-qubit CX backend**: Verify output uses only
@@ -2472,14 +2562,16 @@ verify output distribution matches expectations.
     -> verify same result.
 93. **ZYZ decomposition round-trip**: Single-qubit circuit -> decompose ->
     simulate -> verify.
-94. **IBM payload structure**: Build circuit -> transpile via IBMBackend ->
-    verify payload JSON has correct structure, including `params.version` and a
-    Sampler V2 PUB tuple in `params.pubs` whose third element is the submitted
-    job's `shots` value.
+94. **IBM payload structure**: Build a circuit with multiple named classical
+    registers -> transpile via IBMBackend -> verify payload JSON has correct
+    structure, including `params.version` and a Sampler V2 PUB tuple in
+    `params.pubs` whose third element is the submitted job's `shots` value.
 95. **IBM OpenQASM 3 in payload**: Verify the serialized circuit in the IBM
-    payload is valid OpenQASM 3.
+    payload is valid OpenQASM 3 and preserves separate classical-register
+    declarations in order.
 96. **Transpile preserves measurement semantics**: Circuit with mid-circuit
-    measurement -> transpile -> simulate -> same distribution.
+    measurement and multiple named classical registers -> transpile -> simulate
+    -> same distribution.
 97. **qBraid payload structure**: Build circuit -> transpile via QBraidBackend
     for a mock device whose `runInputTypes` include `qasm3` -> verify payload
     JSON has correct structure (`shots`, `deviceQrn`, `program.format`,
@@ -2577,6 +2669,9 @@ Before declaring the library done, verify:
 - [ ] Global phase gate implemented and tested.
 - [ ] All circuit builder methods wired up (every gate, measure, reset, barrier,
       delay, control flow, composition, inverse, complexity, blochSphere, run).
+- [ ] Ordered named classical-register metadata is preserved through circuit
+      construction, composition, transpilation, serialization, simulation, and
+      backend execution.
 - [ ] `prepareState()` and `initialize()` implemented and tested.
 - [ ] `unitary()` (arbitrary unitary matrix) implemented and tested.
 - [ ] `SimulatorBackend.execute()` returns correct distributions for all
@@ -2586,8 +2681,10 @@ Before declaring the library done, verify:
 - [ ] `Serializer` interface defined with `serialize` and `deserialize`.
 - [ ] `OpenQASM3Serializer` fully implements serialize and deserialize.
 - [ ] OpenQASM 3 serialization handles all gates, measurements, resets,
-      barriers, delays, global phase, and control flow.
-- [ ] OpenQASM 3 deserialization reconstructs circuits faithfully.
+      barriers, delays, global phase, control flow, and multiple named
+      classical-register declarations in order.
+- [ ] OpenQASM 3 deserialization reconstructs circuits faithfully, including
+      classical-register names and order.
 - [ ] Round-trip `deserialize(serialize(circuit))` produces equivalent circuits.
 - [ ] Symbolic parameters (`Param`) work with arithmetic expressions.
 - [ ] `run()` correctly binds parameters.
@@ -2611,14 +2708,16 @@ Before declaring the library done, verify:
       removal, commutation).
 - [ ] IBM payload structure matches specification (program_id, backend,
       `params.version` as `2` or `"2"`, Sampler V2 PUB tuple, per-job `shots`
-      carried in the tuple rather than `BackendConfiguration`).
+      carried in the tuple rather than `BackendConfiguration`, and serializer
+      output that preserves named classical registers in order).
 - [ ] IBM executable contains API config with exactly one authentication mode:
       direct `bearerToken` support or IAM auth flow from `apiKey`, required
       `Authorization`, `Service-CRN`, `Accept`, `Content-Type`, and
       `IBM-API-Version` headers, route templates, capitalized status handling
-      from `status` or `state.status`, and all-register Sampler reconstruction
-      from `results[0].data.<register>.samples` in compiled-circuit register
-      order to rebuild the final histogram.
+      from `status` or `state.status`, ordered named classical-register metadata
+      on the executable, and all-register Sampler reconstruction from
+      `results[0].data.<register>.samples` in compiled-circuit register order to
+      rebuild the final histogram.
 - [ ] qBraid payload structure matches specification for the selected supported
       `runInputType` (for example, a qasm3-capable device uses per-job `shots`,
       `deviceQrn`, and `program`).
@@ -2667,10 +2766,10 @@ environment variables and are skipped by default:
 Everything else — transpilation pipeline, payload construction, IBM CRN-aware
 auth configuration, IBM Sampler V2 PUB formatting with per-job `shots`, IBM
 register-based sample parsing logic that rebuilds the final histogram from all
-classical registers in circuit order, qBraid device-discovery and
-`runInputTypes` validation, qBraid `{ success, data }` envelope parsing,
-OpenQASM 3 serialization within both backend flows, coupling map handling — **is
-tested** using mock configurations.
+named classical registers in circuit order using preserved executable metadata,
+qBraid device-discovery and `runInputTypes` validation, qBraid
+`{ success, data }` envelope parsing, OpenQASM 3 serialization within both
+backend flows, coupling map handling — **is tested** using mock configurations.
 
 ## 12. Out of Scope
 
