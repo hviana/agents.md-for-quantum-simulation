@@ -1512,7 +1512,10 @@ payload = {
 ```
 
 The PUB tuple is ordered as `[circuit, parameterValues, shots]`. For a circuit
-with no symbolic parameters, use `null` for `parameterValues`.
+with no symbolic parameters, use `null` for `parameterValues`. Use
+`params.version = 2` or `params.version = "2"` depending on the target
+language's JSON conventions; tests should accept either representation as long
+as the Sampler V2 contract is preserved.
 
 **Authentication flow**
 
@@ -1585,25 +1588,43 @@ IBMExecutable {
    Every runtime request must include `Authorization`, `Service-CRN`, `Accept`,
    `Content-Type`, and `IBM-API-Version` headers.
 3. **Poll for completion:** GET `endpoint + routes.status` with `job_id`. Read
-   the status from `response.state.status` and handle at minimum: "Queued",
-   "Running", "Completed", "Failed", and "Cancelled".
+   the status from `response.status` when present, otherwise from
+   `response.state.status`. Handle at minimum the real capitalized API values:
+   "Queued", "Running", "Completed", "Failed", and "Cancelled". Treat "Queued"
+   and "Running" as transient states; treat "Completed", "Failed", and
+   "Cancelled" as terminal states.
 4. **Retrieve results:** GET `endpoint + routes.results`.
 5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Do **not**
    assume legacy measurement counts live at `response.results[0].data.counts`.
-   Inspect the returned PUB result objects and derive counts from the actual
-   measurement payload. For a single-PUB submission, this will typically mean
-   reading hex samples from `response.results[0].data.meas.samples`, padding
-   each sample to `numClbits`, and converting the resulting histogram to
-   percentages.
+   Inspect each PUB result's `data` object, detect the actual classical register
+   name(s) dynamically, and derive counts from whichever register payload
+   exposes a `samples` array. For a single-register circuit this often looks
+   like `response.results[0].data.<register>.samples`; do **not** hardcode
+   `meas`. If multiple classical registers are returned, reconstruct the full
+   measurement bitstring in classical-register order before converting the final
+   histogram to percentages.
 
 ```
 pubResults = response.results or []
 sampleCounts = {}
 for pubResult in pubResults:
-  samples = pubResult.data.meas.samples
-  for sample in samples:
-    bitstring = hexToBinary(sample, executable.numClbits)
-    sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
+  registerEntries = []
+  for registerName, registerData in (pubResult.data or {}).items():
+    if registerData has field "samples":
+      registerEntries.append((registerName, registerData.samples))
+
+  if registerEntries is empty:
+    raise result parsing error
+
+  if length(registerEntries) == 1:
+    _, samples = registerEntries[0]
+    for sample in samples:
+      bitstring = normalizeSample(sample, executable.numClbits)
+      sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
+  else:
+    for shotIndex in range(number of samples in first register):
+      bitstring = combineRegisterSamples(registerEntries, shotIndex, executable)
+      sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
 
 totalShots = sum of all sampleCounts values
 percentages = {}
@@ -1646,15 +1667,19 @@ Tests that can run without credentials (using the transpilation pipeline only):
   uses only basis gates.
 - Verify coupling map is respected: all 2-qubit gates on connected pairs.
 - Verify the OpenQASM 3 serialization is valid in the payload.
-- Verify the payload structure: has `program_id`, `backend`, `params.version`,
-  and Sampler V2 PUB tuples in `params.pubs`.
+- Verify the payload structure: has `program_id`, `backend`, `params.version`
+  (`2` or `"2"`), and Sampler V2 PUB tuples in `params.pubs`.
 - Verify API config supports either direct `bearerToken` auth or `apiKey` + IAM
   token exchange, exposes the IAM token endpoint, and includes the required
   headers (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`,
   `IBM-API-Version`) plus routes.
 - Verify `IBMExecutable` contains all required fields.
-- Verify Sampler V2 result parsing derives histograms from PUB measurement
-  payloads rather than assuming a legacy `data.counts` field.
+- Verify polling logic accepts status from either `status` or `state.status` and
+  handles the real capitalized API values ("Queued", "Running", "Completed",
+  "Failed", "Cancelled").
+- Verify Sampler V2 result parsing dynamically detects classical register names
+  and derives histograms from `results[0].data.<register>.samples` rather than
+  assuming a hardcoded `data.meas.samples` or legacy `data.counts` field.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for ECR-based backend: verify ECR gates in output.
@@ -1668,8 +1693,9 @@ Tests that require credentials (skipped by default):
 - Submit a Bell state job to a real IBM backend and retrieve results.
 - Verify returned percentages sum to 100.
 - Verify bitstring format is correct.
-- Poll status transitions: Queued -> Running -> Completed.
-- Handle failed/cancelled jobs gracefully.
+- Poll status transitions using the real capitalized API values (for example,
+  Queued -> Running -> Completed).
+- Handle Failed/Cancelled jobs gracefully.
 - End-to-end: build circuit -> transpile -> execute -> verify distribution.
 
 ---
@@ -1773,16 +1799,22 @@ QBraidExecutable {
 
 #### `execute(executable) -> ExecutionResult`
 
+All qBraid API v2 responses are wrapped in a `{ success, data }` envelope. Do
+**not** assume flattened top-level response fields.
+
 1. **Submit job:** POST to `endpoint + routes.submit` with payload as body.
-   Parse the submission response from its nested `data` object and read the job
-   identifier from `submitResult.data.jobQrn`.
+   Parse the submission response from its `{ success, data }` envelope, verify
+   `submitResult.success`, and read the job identifier from
+   `submitResult.data.jobQrn`.
 2. **Poll for completion:** GET `endpoint + routes.status` with URL-encoded
-   `jobQrn`. Parse the polling response from its nested `data` object, read the
-   status from `statusResult.data.status`, and treat "INITIALIZING", "QUEUED",
-   and "RUNNING" as transient statuses. Handle terminal statuses at minimum:
-   "COMPLETED", "FAILED", and "CANCELLED".
+   `jobQrn`. Parse the polling response from its `{ success, data }` envelope,
+   verify `statusResult.success`, read the status from
+   `statusResult.data.status`, and treat "INITIALIZING", "QUEUED", and "RUNNING"
+   as transient statuses. Handle terminal statuses at minimum: "COMPLETED",
+   "FAILED", and "CANCELLED".
 3. **Retrieve results:** GET `endpoint + routes.results` with URL-encoded
-   `jobQrn`. Parse the response from its nested `data` object.
+   `jobQrn`. Parse the response from its `{ success, data }` envelope, verify
+   `resultsData.success`, and read the result payload from `resultsData.data`.
 4. **Parse results:** Read measurement counts from
    `resultsData.data.resultData.measurementCounts` and convert them to bitstring
    percentages.
@@ -1815,8 +1847,9 @@ Tests that can run without credentials (using the transpilation pipeline only):
   `program.data`.
 - Verify API config has correct headers (`X-API-KEY`), routes.
 - Verify `QBraidExecutable` contains all required fields.
-- Verify nested qBraid response parsing using mock fixtures for submit, status,
-  and result payloads (`data.jobQrn`, `data.status`,
+- Verify qBraid response parsing uses the `{ success, data }` envelope rather
+  than assuming flattened responses, using mock fixtures for submit, status, and
+  result payloads (`data.jobQrn`, `data.status`,
   `data.resultData.measurementCounts`).
 - Verify `INITIALIZING` is treated as a transient polling status.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
@@ -2428,8 +2461,14 @@ language:
    polling, and result retrieval. These are **skipped by default** and only run
    when the respective environment variables are set:
    - IBM: `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN`, and
-     optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
-   - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
+     optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`. These tests should
+     validate CRN-aware authentication, the `IBM-API-Version` header, Sampler V2
+     PUB tuples, capitalized runtime statuses, and result parsing from
+     register-based `<register>.samples` payloads.
+   - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`. These tests should
+     validate `{ success, data }` response envelopes, `data.jobQrn`,
+     `data.status`, transient `INITIALIZING`, and
+     `data.resultData.measurementCounts`.
 
 The test runner output must clearly indicate which tests were skipped and why.
 
@@ -2499,16 +2538,19 @@ Before declaring the library done, verify:
 - [ ] Optimization passes reduce gate count (cancellation, merging, identity
       removal, commutation).
 - [ ] IBM payload structure matches specification (program_id, backend,
-      `params.version`, Sampler V2 PUB tuple).
+      `params.version` as `2` or `"2"`, Sampler V2 PUB tuple).
 - [ ] IBM executable contains API config with either direct `bearerToken`
       support or IAM auth flow from `apiKey`, required `Authorization`,
       `Service-CRN`, `Accept`, `Content-Type`, and `IBM-API-Version` headers,
-      and route templates.
+      route templates, capitalized status handling from `status` or
+      `state.status`, and dynamic register-based sample parsing from
+      `results[0].data.<register>.samples`.
 - [ ] qBraid payload structure matches specification (shots, deviceQrn,
       program).
 - [ ] qBraid executable contains API config with X-API-KEY header, route
-      templates, nested `data` response parsing, and transient `INITIALIZING`
-      polling handling.
+      templates, `{ success, data }` response parsing, `data.jobQrn`,
+      `data.status`, `data.resultData.measurementCounts`, and transient
+      `INITIALIZING` polling handling.
 - [ ] Transpiled circuits produce equivalent measurement distributions to
       original circuits when simulated.
 - [ ] IBM execution tests exist and are gated behind (`IBM_BEARER_TOKEN` or
@@ -2542,7 +2584,9 @@ environment variables and are skipped by default:
   optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
 - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
-Everything else — transpilation pipeline, payload construction, OpenQASM 3
+Everything else — transpilation pipeline, payload construction, IBM CRN-aware
+auth configuration, IBM Sampler V2 PUB formatting, IBM register-based sample
+parsing logic, qBraid `{ success, data }` envelope parsing, OpenQASM 3
 serialization within both backend flows, coupling map handling — **is tested**
 using mock configurations.
 
