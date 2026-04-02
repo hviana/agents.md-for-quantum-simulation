@@ -197,7 +197,6 @@ BackendConfiguration {
   numQubits: number
   basisGates: string[]
   couplingMap: [number, number][] | null   // null = all-to-all
-  maxShots: number
 }
 
 IBMBackendConfiguration extends BackendConfiguration {
@@ -205,8 +204,8 @@ IBMBackendConfiguration extends BackendConfiguration {
   gateProperties: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
   maxCircuits: number | null
   apiEndpoint: string           // default: "https://quantum.cloud.ibm.com/api/v1"
-  bearerToken?: string          // Optional direct bearer token for IBM Quantum runtime requests
-  apiKey?: string               // Optional IBM Cloud API key used to mint an IAM bearer token
+  bearerToken?: string          // Direct bearer token for IBM Quantum runtime requests; mutually exclusive with apiKey
+  apiKey?: string               // IBM Cloud API key used to mint an IAM bearer token; mutually exclusive with bearerToken
   serviceCrn: string            // required Service-CRN header value for IBM Quantum REST API
   apiVersion: string            // required IBM-API-Version header value (default: "2026-02-15")
 }
@@ -241,6 +240,11 @@ ExecutionResult = map<string, number>  // bitstring -> percentage (0-100, e.g. {
 SerializedCircuit = string  // OpenQASM 3 program text
 ```
 
+Shot count is a **per-execution / per-submitted-job input**, not a backend
+capability field. Do not store it on `BackendConfiguration`; carry it in the
+language-idiomatic execution/packaging call and in the resulting executable/job
+payload.
+
 **Tests (minimum 10):**
 
 - Verify Instruction creation with all fields populated.
@@ -248,8 +252,10 @@ SerializedCircuit = string  // OpenQASM 3 program text
 - Verify CircuitComplexity struct defaults and field types.
 - Verify BlochCoordinates struct field ranges.
 - Verify BackendConfiguration creation with and without coupling map.
-- Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and either
-  `bearerToken` or `apiKey`.
+- Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and
+  exactly one of `bearerToken` or `apiKey`.
+- Verify shot count is modeled as a per-execution/per-job input rather than a
+  `BackendConfiguration` field.
 - Edge cases: 0 qubits, 0 classical bits, empty instructions list.
 - Verify ExecutionResult percentages summing to 100.
 - Type validation edge cases.
@@ -985,9 +991,10 @@ chaining). Angle parameters accept `number | Param`.
 
 **Transpilation:**
 
-- `qc.transpile(backend)` — calls `backend.transpileAndPackage(this)` and
-  returns the opaque executable. This is the entry point for compiling a circuit
-  for a specific backend.
+- `qc.transpile(backend, shots?)` — calls
+  `backend.transpileAndPackage(this, shots)` and returns the opaque executable.
+  `shots` is a per-execution input used when the backend packages a submitted
+  job. This is the entry point for compiling a circuit for a specific backend.
 
 **Tests (minimum 40):**
 
@@ -1025,12 +1032,15 @@ interface Backend {
   basisGates: string[]
   couplingMap: [number, number][] | null
 
-  transpileAndPackage(circuit: QuantumCircuit) -> Executable
+  transpileAndPackage(circuit: QuantumCircuit, shots?: number) -> Executable
   execute(executable: Executable) -> ExecutionResult
 }
 ```
 
 Where `Executable` is an opaque, backend-specific object.
+
+`shots` is a per-execution input. Backends that submit remote jobs must carry it
+in the packaged executable/job payload rather than in `BackendConfiguration`.
 
 This file defines only the interface. Concrete implementations are in separate
 files.
@@ -1060,7 +1070,7 @@ SimulatorBackend(numShots = 1024)
 - `basisGates`: All gates supported.
 - `couplingMap`: `null` (all-to-all).
 
-#### `transpileAndPackage(circuit) -> SimulatorExecutable`
+#### `transpileAndPackage(circuit, shots?) -> SimulatorExecutable`
 
 Since the simulator supports all gates and has no connectivity constraints, this
 simply validates the circuit and wraps it:
@@ -1068,7 +1078,7 @@ simply validates the circuit and wraps it:
 ```
 SimulatorExecutable {
   circuit: QuantumCircuit
-  numShots: number
+  numShots: shots ?? this.numShots
 }
 ```
 
@@ -1471,7 +1481,7 @@ everywhere for direct bearer-token authentication. Do not introduce alternate
 names such as `ibmApiVersion` or `apiToken` in configuration structs, executable
 metadata, helper functions, or tests.
 
-#### `transpileAndPackage(circuit) -> IBMExecutable`
+#### `transpileAndPackage(circuit, shots = 1024) -> IBMExecutable`
 
 **Phase 1: Build Target Description**
 
@@ -1512,7 +1522,7 @@ payload = {
   "params": {
     "version": 2,
     "pubs": [
-      [serializedCircuit, null, configuration.maxShots]
+      [serializedCircuit, null, shots]
     ]
   }
 }
@@ -1522,7 +1532,9 @@ The PUB tuple is ordered as `[circuit, parameterValues, shots]`. For a circuit
 with no symbolic parameters, use `null` for `parameterValues`. Use
 `params.version = 2` or `params.version = "2"` depending on the target
 language's JSON conventions; tests should accept either representation as long
-as the Sampler V2 contract is preserved.
+as the Sampler V2 contract is preserved. `shots` is a per-submitted-job value
+carried in the PUB tuple; it must not be modeled as a backend capability field
+on `BackendConfiguration`.
 
 **Authentication flow**
 
@@ -1533,7 +1545,8 @@ Support both IBM authentication modes:
 - If `configuration.apiKey` is provided, exchange it for an IAM bearer token
   before calling the IBM Quantum REST API.
 
-Exactly one of `bearerToken` or `apiKey` must be supplied.
+Exactly one of `bearerToken` or `apiKey` must be supplied. Reject configurations
+where both are supplied or both are missing.
 
 IAM exchange flow:
 
@@ -1603,12 +1616,16 @@ IBMExecutable {
 4. **Retrieve results:** GET `endpoint + routes.results`.
 5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Inspect each
    PUB result's `data` object and reconstruct each shot from **all** classical
-   registers in the compiled circuit's classical-register order. Do **not**
-   hardcode `meas`, and do **not** treat a single
+   registers in the compiled circuit's classical-register order. The final
+   histogram **must** be rebuilt from those per-register samples; do **not**
+   hardcode `meas`, do **not** treat a single
    `response.results[0].data.<register>.samples` payload as the full result for
-   a multi-register circuit. IBM Sampler output is register-scoped; the final
-   histogram must be rebuilt by concatenating every classical-register sample in
-   register order before converting counts to percentages.
+   a multi-register circuit, and do **not** accept a legacy flat `data.counts`
+   object as the canonical source of truth. IBM Runtime REST / Sampler V2 is
+   header-driven (`Authorization`, `Service-CRN`, `IBM-API-Version`) and
+   register-oriented, so the only valid histogram reconstruction path is to
+   concatenate every classical-register sample in circuit order before
+   converting counts to percentages.
 
 ```
 pubResults = response.results or []
@@ -1679,20 +1696,22 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - Verify coupling map is respected: all 2-qubit gates on connected pairs.
 - Verify the OpenQASM 3 serialization is valid in the payload.
 - Verify the payload structure: has `program_id`, `backend`, `params.version`
-  (`2` or `"2"`), and Sampler V2 PUB tuples in `params.pubs`.
-- Verify API config supports either direct `bearerToken` auth or `apiKey` + IAM
-  token exchange, exposes the IAM token endpoint, and includes the required
-  headers (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`,
-  `IBM-API-Version`) plus routes.
+  (`2` or `"2"`), and Sampler V2 PUB tuples in `params.pubs` whose third element
+  is the submitted job's `shots` value.
+- Verify API config supports exactly one authentication mode at a time: direct
+  `bearerToken` auth or `apiKey` + IAM token exchange; reject both/neither,
+  expose the IAM token endpoint, and include the required headers
+  (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`, `IBM-API-Version`)
+  plus routes.
 - Verify `IBMExecutable` contains all required fields.
 - Verify polling logic accepts status from either `status` or `state.status` and
   handles the real capitalized API values ("Queued", "Running", "Completed",
   "Failed", "Cancelled").
 - Verify Sampler V2 result parsing dynamically detects all classical register
-  names, preserves compiled-circuit register order, and reconstructs each shot
-  from all `results[0].data.<register>.samples` payloads rather than assuming a
-  hardcoded `data.meas.samples`, a single-register shortcut, or a legacy
-  `data.counts` field.
+  names, preserves compiled-circuit register order, rebuilds the final histogram
+  by reconstructing each shot from all `results[0].data.<register>.samples`
+  payloads, and does not assume a hardcoded `data.meas.samples`, a
+  single-register shortcut, or a legacy `data.counts` field.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for ECR-based backend: verify ECR gates in output.
@@ -1732,7 +1751,7 @@ QBraidBackend(configuration: QBraidBackendConfiguration)
 - `basisGates`: from configuration.
 - `couplingMap`: from configuration.
 
-#### `transpileAndPackage(circuit) -> QBraidExecutable`
+#### `transpileAndPackage(circuit, shots = 1024) -> QBraidExecutable`
 
 **Phase 0: Discover Device Capabilities**
 
@@ -1779,7 +1798,7 @@ include `qasm3`:
 
 ```
 payload = {
-  "shots": configuration.maxShots,
+  "shots": shots,
   "deviceQrn": configuration.deviceQrn,
   "program": {
     "format": "qasm3",
@@ -1790,6 +1809,9 @@ payload = {
   "runtimeOptions": {}
 }
 ```
+
+As with IBM, `shots` is a per-submitted-job value carried in the payload, not a
+backend capability field on `BackendConfiguration`.
 
 Construct API configuration (default endpoint:
 `https://api-v2.qbraid.com/api/v1`):
@@ -1878,7 +1900,8 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - Verify device capability discovery/validation reads `data.runInputTypes`
   before packaging and rejects unsupported `program.format` assumptions.
 - Verify the payload structure for a mock qasm3-capable device: has `shots`,
-  `deviceQrn`, `program.format`, `program.data`.
+  `deviceQrn`, `program.format`, `program.data`, and uses the submitted job's
+  shot count.
 - Verify API config has correct headers (`X-API-KEY`), device-discovery route,
   and job routes.
 - Verify `QBraidExecutable` contains all required fields.
@@ -2451,7 +2474,8 @@ verify output distribution matches expectations.
     simulate -> verify.
 94. **IBM payload structure**: Build circuit -> transpile via IBMBackend ->
     verify payload JSON has correct structure, including `params.version` and a
-    Sampler V2 PUB tuple in `params.pubs`.
+    Sampler V2 PUB tuple in `params.pubs` whose third element is the submitted
+    job's `shots` value.
 95. **IBM OpenQASM 3 in payload**: Verify the serialized circuit in the IBM
     payload is valid OpenQASM 3.
 96. **Transpile preserves measurement semantics**: Circuit with mid-circuit
@@ -2486,6 +2510,10 @@ language:
 | Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`                                                                                           |
 | Go         | `if ((os.Getenv("IBM_BEARER_TOKEN") == "" && os.Getenv("IBM_API_KEY") == "")                                                                        |
 
+The skip gate only determines whether IBM credentials are present at all. Once
+enabled, the IBM execution tests must still assert that **exactly one** of
+`IBM_BEARER_TOKEN` or `IBM_API_KEY` is set.
+
 **qBraid Backend:**
 
 | Language   | Mechanism                                                        |
@@ -2502,11 +2530,12 @@ language:
 2. **`ibm_execute` / `qbraid_execute` tests**: Test actual job submission,
    polling, and result retrieval. These are **skipped by default** and only run
    when the respective environment variables are set:
-   - IBM: `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN`, and
-     optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`. These tests should
-     validate CRN-aware authentication, the `IBM-API-Version` header, Sampler V2
-     PUB tuples, capitalized runtime statuses, and result parsing from
-     register-based `<register>.samples` payloads.
+   - IBM: exactly one of `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus
+     `IBM_SERVICE_CRN`, and optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`.
+     These tests should validate CRN-aware authentication, the `IBM-API-Version`
+     header, Sampler V2 PUB tuples with per-job `shots`, capitalized runtime
+     statuses, and result parsing from register-based `<register>.samples`
+     payloads reconstructed in compiled-circuit register order.
    - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`. These tests should
      validate device discovery and `runInputTypes` handling, `{ success, data }`
      response envelopes, `data.jobQrn`, `data.status`, the full documented
@@ -2581,15 +2610,17 @@ Before declaring the library done, verify:
 - [ ] Optimization passes reduce gate count (cancellation, merging, identity
       removal, commutation).
 - [ ] IBM payload structure matches specification (program_id, backend,
-      `params.version` as `2` or `"2"`, Sampler V2 PUB tuple).
-- [ ] IBM executable contains API config with either direct `bearerToken`
-      support or IAM auth flow from `apiKey`, required `Authorization`,
-      `Service-CRN`, `Accept`, `Content-Type`, and `IBM-API-Version` headers,
-      route templates, capitalized status handling from `status` or
-      `state.status`, and all-register Sampler reconstruction from
-      `results[0].data.<register>.samples` in compiled-circuit register order.
+      `params.version` as `2` or `"2"`, Sampler V2 PUB tuple, per-job `shots`
+      carried in the tuple rather than `BackendConfiguration`).
+- [ ] IBM executable contains API config with exactly one authentication mode:
+      direct `bearerToken` support or IAM auth flow from `apiKey`, required
+      `Authorization`, `Service-CRN`, `Accept`, `Content-Type`, and
+      `IBM-API-Version` headers, route templates, capitalized status handling
+      from `status` or `state.status`, and all-register Sampler reconstruction
+      from `results[0].data.<register>.samples` in compiled-circuit register
+      order to rebuild the final histogram.
 - [ ] qBraid payload structure matches specification for the selected supported
-      `runInputType` (for example, a qasm3-capable device uses `shots`,
+      `runInputType` (for example, a qasm3-capable device uses per-job `shots`,
       `deviceQrn`, and `program`).
 - [ ] qBraid executable contains API config with X-API-KEY header,
       device-discovery route, `runInputTypes` validation/discovery before
@@ -2602,8 +2633,8 @@ Before declaring the library done, verify:
       `CANCELLING`, and explicit handling for `UNKNOWN` / `HOLD`.
 - [ ] Transpiled circuits produce equivalent measurement distributions to
       original circuits when simulated.
-- [ ] IBM execution tests exist and are gated behind (`IBM_BEARER_TOKEN` or
-      `IBM_API_KEY`) plus `IBM_SERVICE_CRN` env vars.
+- [ ] IBM execution tests exist and are gated behind exactly one of
+      `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN` env vars.
 - [ ] qBraid execution tests exist and are gated behind `QBRAID_API_KEY` env
       var.
 - [ ] Complex class has all methods, fully tested.
@@ -2629,15 +2660,17 @@ construction, job submission, polling, and result retrieval. However, the
 **cannot be tested without credentials**. These tests are gated behind
 environment variables and are skipped by default:
 
-- IBM: `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN`, and
-  optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
+- IBM: exactly one of `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus
+  `IBM_SERVICE_CRN`, and optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
 - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
 Everything else — transpilation pipeline, payload construction, IBM CRN-aware
-auth configuration, IBM Sampler V2 PUB formatting, IBM register-based sample
-parsing logic, qBraid device-discovery and `runInputTypes` validation, qBraid
-`{ success, data }` envelope parsing, OpenQASM 3 serialization within both
-backend flows, coupling map handling — **is tested** using mock configurations.
+auth configuration, IBM Sampler V2 PUB formatting with per-job `shots`, IBM
+register-based sample parsing logic that rebuilds the final histogram from all
+classical registers in circuit order, qBraid device-discovery and
+`runInputTypes` validation, qBraid `{ success, data }` envelope parsing,
+OpenQASM 3 serialization within both backend flows, coupling map handling — **is
+tested** using mock configurations.
 
 ## 12. Out of Scope
 
