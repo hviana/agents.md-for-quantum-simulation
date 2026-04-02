@@ -1594,15 +1594,14 @@ IBMExecutable {
    and "Running" as transient states; treat "Completed", "Failed", and
    "Cancelled" as terminal states.
 4. **Retrieve results:** GET `endpoint + routes.results`.
-5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Do **not**
-   assume legacy measurement counts live at `response.results[0].data.counts`.
-   Inspect each PUB result's `data` object, detect the actual classical register
-   name(s) dynamically, and derive counts from whichever register payload
-   exposes a `samples` array. For a single-register circuit this often looks
-   like `response.results[0].data.<register>.samples`; do **not** hardcode
-   `meas`. If multiple classical registers are returned, reconstruct the full
-   measurement bitstring in classical-register order before converting the final
-   histogram to percentages.
+5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Inspect each
+   PUB result's `data` object, detect the actual classical register name(s)
+   dynamically, and derive counts from whichever register payload exposes a
+   `samples` array. For a single-register circuit this often looks like
+   `response.results[0].data.<register>.samples`; do **not** hardcode `meas`. If
+   multiple classical registers are returned, reconstruct the full measurement
+   bitstring in classical-register order before converting the final histogram
+   to percentages.
 
 ```
 pubResults = response.results or []
