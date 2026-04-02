@@ -205,7 +205,8 @@ IBMBackendConfiguration extends BackendConfiguration {
   gateProperties: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
   maxCircuits: number | null
   apiEndpoint: string           // default: "https://quantum.cloud.ibm.com/api/v1"
-  apiToken: string              // IBM Cloud API key used to mint an IAM bearer token
+  bearerToken?: string          // Optional direct bearer token for IBM Quantum runtime requests
+  apiKey?: string               // Optional IBM Cloud API key used to mint an IAM bearer token
   serviceCrn: string            // required Service-CRN header value for IBM Quantum REST API
   apiVersion: string            // required IBM-API-Version header value (default: "2026-02-15")
 }
@@ -247,7 +248,8 @@ SerializedCircuit = string  // OpenQASM 3 program text
 - Verify CircuitComplexity struct defaults and field types.
 - Verify BlochCoordinates struct field ranges.
 - Verify BackendConfiguration creation with and without coupling map.
-- Verify IBMBackendConfiguration includes `serviceCrn` and `apiVersion`.
+- Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and either
+  `bearerToken` or `apiKey`.
 - Edge cases: 0 qubits, 0 classical bits, empty instructions list.
 - Verify ExecutionResult percentages summing to 100.
 - Type validation edge cases.
@@ -1514,15 +1516,22 @@ with no symbolic parameters, use `null` for `parameterValues`.
 
 **Authentication flow**
 
-`configuration.apiToken` is the long-lived IBM Cloud API key, not the bearer
-token sent to the runtime service. Before calling the IBM Quantum REST API,
-exchange the API key for an IAM bearer token:
+Support both IBM authentication modes:
+
+- If `configuration.bearerToken` is provided, use it directly for runtime
+  requests.
+- If `configuration.apiKey` is provided, exchange it for an IAM bearer token
+  before calling the IBM Quantum REST API.
+
+Exactly one of `bearerToken` or `apiKey` must be supplied.
+
+IAM exchange flow:
 
 ```
 POST https://iam.cloud.ibm.com/identity/token
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=<configuration.apiToken>
+grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=<configuration.apiKey>
 ```
 
 Use the returned `access_token` as the bearer token for runtime requests. Cache
@@ -1535,15 +1544,16 @@ Construct API configuration (default endpoint:
 apiConfig = {
   "endpoint": configuration.apiEndpoint,  // default: "https://quantum.cloud.ibm.com/api/v1"
   "iamTokenEndpoint": "https://iam.cloud.ibm.com/identity/token",
-  "apiKey": configuration.apiToken,
+  "bearerToken": configuration.bearerToken ?? null,
+  "apiKey": configuration.apiKey ?? null,
   "serviceCrn": configuration.serviceCrn,
   "apiVersion": configuration.apiVersion,
   "headers": {
-    "Authorization": "Bearer " + bearerToken,
+    "Authorization": "Bearer " + resolvedBearerToken,
     "Service-CRN": configuration.serviceCrn,
-    "IBM-API-Version": configuration.apiVersion,
+    "Accept": "application/json",
     "Content-Type": "application/json",
-    "Accept": "application/json"
+    "IBM-API-Version": configuration.apiVersion,
   },
   "routes": {
     "submit": "/jobs",
@@ -1567,26 +1577,33 @@ IBMExecutable {
 
 #### `execute(executable) -> ExecutionResult`
 
-1. **Acquire bearer token:** If no unexpired IAM bearer token is cached, call
-   the IAM token endpoint with `configuration.apiToken` and store the returned
+1. **Resolve bearer token:** If `configuration.bearerToken` is present, use it
+   directly. Otherwise, if no unexpired IAM bearer token is cached, call the IAM
+   token endpoint with `configuration.apiKey` and store the returned
    `access_token` plus expiry metadata.
 2. **Submit job:** POST to `endpoint + routes.submit` with payload as body.
-   Every runtime request must include `Authorization`, `Service-CRN`, and
-   `IBM-API-Version` headers.
+   Every runtime request must include `Authorization`, `Service-CRN`, `Accept`,
+   `Content-Type`, and `IBM-API-Version` headers.
 3. **Poll for completion:** GET `endpoint + routes.status` with `job_id`. Read
    the status from `response.state.status` and handle at minimum: "Queued",
    "Running", "Completed", "Failed", and "Cancelled".
 4. **Retrieve results:** GET `endpoint + routes.results`.
-5. **Parse results:** Current Sampler V2 REST responses expose per-PUB samples
-   under `response.results[0].data.meas.samples` as hex strings. Convert that
-   sample list into a histogram, pad each sample to `numClbits`, and convert
-   counts to percentages.
+5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Do **not**
+   assume legacy measurement counts live at `response.results[0].data.counts`.
+   Inspect the returned PUB result objects and derive counts from the actual
+   measurement payload. For a single-PUB submission, this will typically mean
+   reading hex samples from `response.results[0].data.meas.samples`, padding
+   each sample to `numClbits`, and converting the resulting histogram to
+   percentages.
 
 ```
+pubResults = response.results or []
 sampleCounts = {}
-for sample in response.results[0].data.meas.samples:
-  bitstring = hexToBinary(sample, executable.numClbits)
-  sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
+for pubResult in pubResults:
+  samples = pubResult.data.meas.samples
+  for sample in samples:
+    bitstring = hexToBinary(sample, executable.numClbits)
+    sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
 
 totalShots = sum of all sampleCounts values
 percentages = {}
@@ -1631,9 +1648,13 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - Verify the OpenQASM 3 serialization is valid in the payload.
 - Verify the payload structure: has `program_id`, `backend`, `params.version`,
   and Sampler V2 PUB tuples in `params.pubs`.
-- Verify API config has the IAM token endpoint, required headers
-  (`Authorization`, `Service-CRN`, `IBM-API-Version`), and routes.
+- Verify API config supports either direct `bearerToken` auth or `apiKey` + IAM
+  token exchange, exposes the IAM token endpoint, and includes the required
+  headers (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`,
+  `IBM-API-Version`) plus routes.
 - Verify `IBMExecutable` contains all required fields.
+- Verify Sampler V2 result parsing derives histograms from PUB measurement
+  payloads rather than assuming a legacy `data.counts` field.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for ECR-based backend: verify ECR gates in output.
@@ -1752,13 +1773,16 @@ QBraidExecutable {
 
 #### `execute(executable) -> ExecutionResult`
 
-1. **Submit job:** POST to `endpoint + routes.submit` with payload as body. Read
-   the job identifier from `submitResult.data.jobQrn`.
+1. **Submit job:** POST to `endpoint + routes.submit` with payload as body.
+   Parse the submission response from its nested `data` object and read the job
+   identifier from `submitResult.data.jobQrn`.
 2. **Poll for completion:** GET `endpoint + routes.status` with URL-encoded
-   `jobQrn`. Read the status from `statusResult.data.status`. Handle statuses:
-   "INITIALIZING", "QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED".
+   `jobQrn`. Parse the polling response from its nested `data` object, read the
+   status from `statusResult.data.status`, and treat "INITIALIZING", "QUEUED",
+   and "RUNNING" as transient statuses. Handle terminal statuses at minimum:
+   "COMPLETED", "FAILED", and "CANCELLED".
 3. **Retrieve results:** GET `endpoint + routes.results` with URL-encoded
-   `jobQrn`.
+   `jobQrn`. Parse the response from its nested `data` object.
 4. **Parse results:** Read measurement counts from
    `resultsData.data.resultData.measurementCounts` and convert them to bitstring
    percentages.
@@ -1794,6 +1818,7 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - Verify nested qBraid response parsing using mock fixtures for submit, status,
   and result payloads (`data.jobQrn`, `data.status`,
   `data.resultData.measurementCounts`).
+- Verify `INITIALIZING` is treated as a transient polling status.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for CX-based backend: verify CX gates in output.
@@ -1807,7 +1832,7 @@ Tests that require credentials (skipped by default):
 - Submit a Bell state job to a real qBraid device and retrieve results.
 - Verify returned percentages sum to 100.
 - Verify bitstring format is correct.
-- Poll status transitions: QUEUED -> RUNNING -> COMPLETED.
+- Poll status transitions: INITIALIZING -> QUEUED -> RUNNING -> COMPLETED.
 - Handle FAILED/CANCELLED jobs gracefully.
 - End-to-end: build circuit -> transpile -> execute -> verify distribution.
 - List available devices (verify API connectivity).
@@ -2379,12 +2404,12 @@ language:
 
 **IBM Backend:**
 
-| Language   | Mechanism                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------ |
-| TypeScript | Check for `IBM_API_KEY` and `IBM_SERVICE_CRN` env vars; skip with `Deno.test` ignore                   |
-| Python     | `@pytest.mark.skipif(not os.environ.get("IBM_API_KEY") or not os.environ.get("IBM_SERVICE_CRN"), ...)` |
-| Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`                                              |
-| Go         | `if os.Getenv("IBM_API_KEY") == ""                                                                     |
+| Language   | Mechanism                                                                                                                                           |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TypeScript | Check for (`IBM_BEARER_TOKEN` or `IBM_API_KEY`) and `IBM_SERVICE_CRN`; skip with `Deno.test` ignore                                                 |
+| Python     | `@pytest.mark.skipif((not os.environ.get("IBM_BEARER_TOKEN") and not os.environ.get("IBM_API_KEY")) or not os.environ.get("IBM_SERVICE_CRN"), ...)` |
+| Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`                                                                                           |
+| Go         | `if ((os.Getenv("IBM_BEARER_TOKEN") == "" && os.Getenv("IBM_API_KEY") == "")                                                                        |
 
 **qBraid Backend:**
 
@@ -2402,8 +2427,8 @@ language:
 2. **`ibm_execute` / `qbraid_execute` tests**: Test actual job submission,
    polling, and result retrieval. These are **skipped by default** and only run
    when the respective environment variables are set:
-   - IBM: `IBM_API_KEY`, `IBM_SERVICE_CRN`, and optionally `IBM_API_ENDPOINT` /
-     `IBM_API_VERSION`
+   - IBM: `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN`, and
+     optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
    - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
 The test runner output must clearly indicate which tests were skipped and why.
@@ -2475,16 +2500,19 @@ Before declaring the library done, verify:
       removal, commutation).
 - [ ] IBM payload structure matches specification (program_id, backend,
       `params.version`, Sampler V2 PUB tuple).
-- [ ] IBM executable contains API config with IAM auth flow, `Service-CRN`,
-      `IBM-API-Version`, and route templates.
+- [ ] IBM executable contains API config with either direct `bearerToken`
+      support or IAM auth flow from `apiKey`, required `Authorization`,
+      `Service-CRN`, `Accept`, `Content-Type`, and `IBM-API-Version` headers,
+      and route templates.
 - [ ] qBraid payload structure matches specification (shots, deviceQrn,
       program).
 - [ ] qBraid executable contains API config with X-API-KEY header, route
-      templates, and nested `data` response parsing.
+      templates, nested `data` response parsing, and transient `INITIALIZING`
+      polling handling.
 - [ ] Transpiled circuits produce equivalent measurement distributions to
       original circuits when simulated.
-- [ ] IBM execution tests exist and are gated behind `IBM_API_KEY` and
-      `IBM_SERVICE_CRN` env vars.
+- [ ] IBM execution tests exist and are gated behind (`IBM_BEARER_TOKEN` or
+      `IBM_API_KEY`) plus `IBM_SERVICE_CRN` env vars.
 - [ ] qBraid execution tests exist and are gated behind `QBRAID_API_KEY` env
       var.
 - [ ] Complex class has all methods, fully tested.
@@ -2510,8 +2538,8 @@ construction, job submission, polling, and result retrieval. However, the
 **cannot be tested without credentials**. These tests are gated behind
 environment variables and are skipped by default:
 
-- IBM: `IBM_API_KEY`, `IBM_SERVICE_CRN`, and optionally `IBM_API_ENDPOINT` /
-  `IBM_API_VERSION`
+- IBM: `IBM_BEARER_TOKEN` or `IBM_API_KEY`, plus `IBM_SERVICE_CRN`, and
+  optionally `IBM_API_ENDPOINT` / `IBM_API_VERSION`
 - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`
 
 Everything else — transpilation pipeline, payload construction, OpenQASM 3
