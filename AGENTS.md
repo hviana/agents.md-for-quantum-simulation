@@ -1808,9 +1808,15 @@ All qBraid API v2 responses are wrapped in a `{ success, data }` envelope. Do
 2. **Poll for completion:** GET `endpoint + routes.status` with URL-encoded
    `jobQrn`. Parse the polling response from its `{ success, data }` envelope,
    verify `statusResult.success`, read the status from
-   `statusResult.data.status`, and treat "INITIALIZING", "QUEUED", and "RUNNING"
-   as transient statuses. Handle terminal statuses at minimum: "COMPLETED",
-   "FAILED", and "CANCELLED".
+   `statusResult.data.status`, and recognize all currently documented qBraid API
+   v2 job statuses: "INITIALIZING", "QUEUED", "VALIDATING", "RUNNING",
+   "CANCELLING", "CANCELLED", "COMPLETED", "FAILED", "UNKNOWN", and "HOLD".
+   Treat "COMPLETED", "FAILED", and "CANCELLED" as terminal states. Treat
+   "INITIALIZING", "QUEUED", "VALIDATING", "RUNNING", and "CANCELLING" as
+   transient states and continue polling. Add an explicit branch for "UNKNOWN"
+   and "HOLD" so they do not break polling: either continue polling as
+   non-terminal states or surface a clear status-handling path that preserves
+   the observed status for the caller/logs.
 3. **Retrieve results:** GET `endpoint + routes.results` with URL-encoded
    `jobQrn`. Parse the response from its `{ success, data }` envelope, verify
    `resultsData.success`, and read the result payload from `resultsData.data`.
@@ -1850,7 +1856,12 @@ Tests that can run without credentials (using the transpilation pipeline only):
   than assuming flattened responses, using mock fixtures for submit, status, and
   result payloads (`data.jobQrn`, `data.status`,
   `data.resultData.measurementCounts`).
-- Verify `INITIALIZING` is treated as a transient polling status.
+- Verify transient polling statuses include `INITIALIZING`, `QUEUED`,
+  `VALIDATING`, `RUNNING`, and `CANCELLING`.
+- Verify terminal polling statuses include `COMPLETED`, `FAILED`, and
+  `CANCELLED`.
+- Verify `UNKNOWN` and `HOLD` are handled explicitly without breaking polling,
+  either as non-terminal retry states or via a clear surfaced status branch.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for CX-based backend: verify CX gates in output.
@@ -1864,8 +1875,9 @@ Tests that require credentials (skipped by default):
 - Submit a Bell state job to a real qBraid device and retrieve results.
 - Verify returned percentages sum to 100.
 - Verify bitstring format is correct.
-- Poll status transitions: INITIALIZING -> QUEUED -> RUNNING -> COMPLETED.
-- Handle FAILED/CANCELLED jobs gracefully.
+- Poll documented status transitions such as INITIALIZING -> QUEUED ->
+  VALIDATING -> RUNNING -> COMPLETED.
+- Handle CANCELLING -> CANCELLED, FAILED, UNKNOWN, and HOLD states gracefully.
 - End-to-end: build circuit -> transpile -> execute -> verify distribution.
 - List available devices (verify API connectivity).
 
@@ -2466,8 +2478,8 @@ language:
      register-based `<register>.samples` payloads.
    - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`. These tests should
      validate `{ success, data }` response envelopes, `data.jobQrn`,
-     `data.status`, transient `INITIALIZING`, and
-     `data.resultData.measurementCounts`.
+     `data.status`, the full documented qBraid status set, explicit handling for
+     `UNKNOWN` and `HOLD`, and `data.resultData.measurementCounts`.
 
 The test runner output must clearly indicate which tests were skipped and why.
 
@@ -2548,8 +2560,12 @@ Before declaring the library done, verify:
       program).
 - [ ] qBraid executable contains API config with X-API-KEY header, route
       templates, `{ success, data }` response parsing, `data.jobQrn`,
-      `data.status`, `data.resultData.measurementCounts`, and transient
-      `INITIALIZING` polling handling.
+      `data.status`, `data.resultData.measurementCounts`, full qBraid status
+      handling (`INITIALIZING`, `QUEUED`, `VALIDATING`, `RUNNING`, `CANCELLING`,
+      `CANCELLED`, `COMPLETED`, `FAILED`, `UNKNOWN`, `HOLD`), terminal-state
+      classification for `COMPLETED` / `FAILED` / `CANCELLED`, transient-state
+      classification for `INITIALIZING` / `QUEUED` / `VALIDATING` / `RUNNING` /
+      `CANCELLING`, and explicit handling for `UNKNOWN` / `HOLD`.
 - [ ] Transpiled circuits produce equivalent measurement distributions to
       original circuits when simulated.
 - [ ] IBM execution tests exist and are gated behind (`IBM_BEARER_TOKEN` or
