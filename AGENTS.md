@@ -214,7 +214,7 @@ IBMBackendConfiguration extends BackendConfiguration {
 QBraidBackendConfiguration extends BackendConfiguration {
   qubitProperties: map<number, QubitProperties>
   gateProperties: map<string, map<string, GateProperties>>  // gate -> qubit_tuple -> props
-  deviceQrn: string             // qBraid Quantum Resource Name (e.g., "qbraid_qir_simulator")
+  deviceQrn: string             // qBraid Quantum Resource Name returned by the v2 device endpoints (e.g., "qbraid:qbraid:sim:qir-sv")
   apiEndpoint: string           // default: "https://api-v2.qbraid.com/api/v1"
   apiKey: string                // X-API-KEY header value
 }
@@ -1464,6 +1464,13 @@ IBMBackend(configuration: IBMBackendConfiguration)
   or `["cx", "id", "rz", "sx", "x"]`).
 - `couplingMap`: from configuration.
 
+**Configuration naming contract**
+
+Use `apiVersion` everywhere for the IBM API-version field and `bearerToken`
+everywhere for direct bearer-token authentication. Do not introduce alternate
+names such as `ibmApiVersion` or `apiToken` in configuration structs, executable
+metadata, helper functions, or tests.
+
 #### `transpileAndPackage(circuit) -> IBMExecutable`
 
 **Phase 1: Build Target Description**
@@ -1595,35 +1602,40 @@ IBMExecutable {
    "Cancelled" as terminal states.
 4. **Retrieve results:** GET `endpoint + routes.results`.
 5. **Parse results:** Sampler V2 REST responses are PUB-oriented. Inspect each
-   PUB result's `data` object, detect the actual classical register name(s)
-   dynamically, and derive counts from whichever register payload exposes a
-   `samples` array. For a single-register circuit this often looks like
-   `response.results[0].data.<register>.samples`; do **not** hardcode `meas`. If
-   multiple classical registers are returned, reconstruct the full measurement
-   bitstring in classical-register order before converting the final histogram
-   to percentages.
+   PUB result's `data` object and reconstruct each shot from **all** classical
+   registers in the compiled circuit's classical-register order. Do **not**
+   hardcode `meas`, and do **not** treat a single
+   `response.results[0].data.<register>.samples` payload as the full result for
+   a multi-register circuit. IBM Sampler output is register-scoped; the final
+   histogram must be rebuilt by concatenating every classical-register sample in
+   register order before converting counts to percentages.
 
 ```
 pubResults = response.results or []
 sampleCounts = {}
+orderedRegisters = getClassicalRegistersInCircuitOrder(executable.compiledCircuit)
+
 for pubResult in pubResults:
+  data = pubResult.data or {}
   registerEntries = []
-  for registerName, registerData in (pubResult.data or {}).items():
-    if registerData has field "samples":
-      registerEntries.append((registerName, registerData.samples))
+
+  for register in orderedRegisters:
+    registerData = data.get(register.name)
+    if registerData does not have field "samples":
+      raise result parsing error
+    registerEntries.append((register.name, register.size, registerData.samples))
 
   if registerEntries is empty:
     raise result parsing error
 
-  if length(registerEntries) == 1:
-    _, samples = registerEntries[0]
-    for sample in samples:
-      bitstring = normalizeSample(sample, executable.numClbits)
-      sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
-  else:
-    for shotIndex in range(number of samples in first register):
-      bitstring = combineRegisterSamples(registerEntries, shotIndex, executable)
-      sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
+  shotCount = number of samples in first register
+  for shotIndex in range(shotCount):
+    bitstring = combineRegisterSamplesInRegisterOrder(
+      registerEntries,
+      shotIndex,
+      executable.numClbits
+    )
+    sampleCounts[bitstring] = sampleCounts.get(bitstring, 0) + 1
 
 totalShots = sum of all sampleCounts values
 percentages = {}
@@ -1676,9 +1688,11 @@ Tests that can run without credentials (using the transpilation pipeline only):
 - Verify polling logic accepts status from either `status` or `state.status` and
   handles the real capitalized API values ("Queued", "Running", "Completed",
   "Failed", "Cancelled").
-- Verify Sampler V2 result parsing dynamically detects classical register names
-  and derives histograms from `results[0].data.<register>.samples` rather than
-  assuming a hardcoded `data.meas.samples` or legacy `data.counts` field.
+- Verify Sampler V2 result parsing dynamically detects all classical register
+  names, preserves compiled-circuit register order, and reconstructs each shot
+  from all `results[0].data.<register>.samples` payloads rather than assuming a
+  hardcoded `data.meas.samples`, a single-register shortcut, or a legacy
+  `data.counts` field.
 - Transpile a 3-qubit GHZ circuit for a 5-qubit backend: verify routing inserts
   SWAPs if needed.
 - Transpile for ECR-based backend: verify ECR gates in output.
@@ -1720,6 +1734,17 @@ QBraidBackend(configuration: QBraidBackendConfiguration)
 
 #### `transpileAndPackage(circuit) -> QBraidExecutable`
 
+**Phase 0: Discover Device Capabilities**
+
+Before assuming `program.format = "qasm3"` or any other job input shape, query
+`GET /devices/{device_qrn}` (or validate against an equivalent cached device
+description) and inspect `data.runInputTypes`. The backend must only emit a job
+payload format that is explicitly supported by the target device. If the device
+supports `qasm3`, use the OpenQASM 3 payload shape shown below. If it does not,
+either transpile/serialize to another supported input type or raise a clear
+compatibility error. Do not hardcode a single payload shape for all qBraid
+devices.
+
 **Phase 1: Build Target Description**
 
 Construct a `Target` from the configuration (identical approach to IBM):
@@ -1749,7 +1774,8 @@ Use the transpiler module:
 
 Serialize the compiled circuit to OpenQASM 3 using `OpenQASM3Serializer`.
 
-Construct the full API request payload:
+Construct the full API request payload for a device whose `runInputTypes`
+include `qasm3`:
 
 ```
 payload = {
@@ -1777,6 +1803,7 @@ apiConfig = {
     "Content-Type": "application/json"
   },
   "routes": {
+    "device": "/devices/{device_qrn}",
     "submit": "/jobs",
     "status": "/jobs/{job_qrn}",
     "results": "/jobs/{job_qrn}/result"
@@ -1848,9 +1875,12 @@ Tests that can run without credentials (using the transpilation pipeline only):
   uses only basis gates.
 - Verify coupling map is respected: all 2-qubit gates on connected pairs.
 - Verify the OpenQASM 3 serialization is valid in the payload.
-- Verify the payload structure: has `shots`, `deviceQrn`, `program.format`,
-  `program.data`.
-- Verify API config has correct headers (`X-API-KEY`), routes.
+- Verify device capability discovery/validation reads `data.runInputTypes`
+  before packaging and rejects unsupported `program.format` assumptions.
+- Verify the payload structure for a mock qasm3-capable device: has `shots`,
+  `deviceQrn`, `program.format`, `program.data`.
+- Verify API config has correct headers (`X-API-KEY`), device-discovery route,
+  and job routes.
 - Verify `QBraidExecutable` contains all required fields.
 - Verify qBraid response parsing uses the `{ success, data }` envelope rather
   than assuming flattened responses, using mock fixtures for submit, status, and
@@ -2427,18 +2457,19 @@ verify output distribution matches expectations.
 96. **Transpile preserves measurement semantics**: Circuit with mid-circuit
     measurement -> transpile -> simulate -> same distribution.
 97. **qBraid payload structure**: Build circuit -> transpile via QBraidBackend
-    -> verify payload JSON has correct structure (`shots`, `deviceQrn`,
-    `program.format`, `program.data`).
-98. **qBraid OpenQASM 3 in payload**: Verify the serialized circuit in the
-    qBraid payload is valid OpenQASM 3. 99-112. **Generate 14 additional small
-    random circuits** (2-4 qubits, 3-8 gates) using various gate combinations.
-    Compute expected output by manual state-vector calculation or by
-    cross-verifying getStateVector, and check against simulation with 1024
-    shots. 113-132. **Generate 20 transpilation verification circuits**: For
-    each, build a small circuit (2-3 qubits), transpile it for a mock backend
-    with a constrained coupling map and basis gates, then simulate both the
-    original and transpiled circuit and verify they produce equivalent
-    distributions.
+    for a mock device whose `runInputTypes` include `qasm3` -> verify payload
+    JSON has correct structure (`shots`, `deviceQrn`, `program.format`,
+    `program.data`).
+98. **qBraid OpenQASM 3 in payload**: After validating that the mock device
+    supports `qasm3`, verify the serialized circuit in the qBraid payload is
+    valid OpenQASM 3. 99-112. **Generate 14 additional small random circuits**
+    (2-4 qubits, 3-8 gates) using various gate combinations. Compute expected
+    output by manual state-vector calculation or by cross-verifying
+    getStateVector, and check against simulation with 1024 shots. 113-132.
+    **Generate 20 transpilation verification circuits**: For each, build a small
+    circuit (2-3 qubits), transpile it for a mock backend with a constrained
+    coupling map and basis gates, then simulate both the original and transpiled
+    circuit and verify they produce equivalent distributions.
 
 ### 9.3 Skippable Tests (IBM & qBraid Backends)
 
@@ -2477,9 +2508,10 @@ language:
      PUB tuples, capitalized runtime statuses, and result parsing from
      register-based `<register>.samples` payloads.
    - qBraid: `QBRAID_API_KEY` and `QBRAID_API_ENDPOINT`. These tests should
-     validate `{ success, data }` response envelopes, `data.jobQrn`,
-     `data.status`, the full documented qBraid status set, explicit handling for
-     `UNKNOWN` and `HOLD`, and `data.resultData.measurementCounts`.
+     validate device discovery and `runInputTypes` handling, `{ success, data }`
+     response envelopes, `data.jobQrn`, `data.status`, the full documented
+     qBraid status set, explicit handling for `UNKNOWN` and `HOLD`, and
+     `data.resultData.measurementCounts`.
 
 The test runner output must clearly indicate which tests were skipped and why.
 
@@ -2554,12 +2586,14 @@ Before declaring the library done, verify:
       support or IAM auth flow from `apiKey`, required `Authorization`,
       `Service-CRN`, `Accept`, `Content-Type`, and `IBM-API-Version` headers,
       route templates, capitalized status handling from `status` or
-      `state.status`, and dynamic register-based sample parsing from
-      `results[0].data.<register>.samples`.
-- [ ] qBraid payload structure matches specification (shots, deviceQrn,
-      program).
-- [ ] qBraid executable contains API config with X-API-KEY header, route
-      templates, `{ success, data }` response parsing, `data.jobQrn`,
+      `state.status`, and all-register Sampler reconstruction from
+      `results[0].data.<register>.samples` in compiled-circuit register order.
+- [ ] qBraid payload structure matches specification for the selected supported
+      `runInputType` (for example, a qasm3-capable device uses `shots`,
+      `deviceQrn`, and `program`).
+- [ ] qBraid executable contains API config with X-API-KEY header,
+      device-discovery route, `runInputTypes` validation/discovery before
+      packaging, `{ success, data }` response parsing, `data.jobQrn`,
       `data.status`, `data.resultData.measurementCounts`, full qBraid status
       handling (`INITIALIZING`, `QUEUED`, `VALIDATING`, `RUNNING`, `CANCELLING`,
       `CANCELLED`, `COMPLETED`, `FAILED`, `UNKNOWN`, `HOLD`), terminal-state
@@ -2601,9 +2635,9 @@ environment variables and are skipped by default:
 
 Everything else — transpilation pipeline, payload construction, IBM CRN-aware
 auth configuration, IBM Sampler V2 PUB formatting, IBM register-based sample
-parsing logic, qBraid `{ success, data }` envelope parsing, OpenQASM 3
-serialization within both backend flows, coupling map handling — **is tested**
-using mock configurations.
+parsing logic, qBraid device-discovery and `runInputTypes` validation, qBraid
+`{ success, data }` envelope parsing, OpenQASM 3 serialization within both
+backend flows, coupling map handling — **is tested** using mock configurations.
 
 ## 12. Out of Scope
 
