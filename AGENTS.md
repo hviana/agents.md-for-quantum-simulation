@@ -209,11 +209,18 @@ BlochCoordinates {
   r: number                    // Purity radius sqrt(x^2 + y^2 + z^2)
 }
 
+CorsProxyConfiguration {
+  enabled: boolean             // default: false
+  mode: "browser-only" | "always"  // default: "browser-only"
+  baseUrl: string              // default: "https://proxy.corsfix.com/?"
+}
+
 BackendConfiguration {
   name: string
   numQubits: number
   basisGates: string[]
   couplingMap: [number, number][] | null   // null = all-to-all
+  corsProxy?: CorsProxyConfiguration | null // optional HTTP CORS proxy configuration for cloud backends
 }
 
 IBMBackendConfiguration extends BackendConfiguration {
@@ -266,6 +273,16 @@ capability field. Do not store it on `BackendConfiguration`; carry it in the
 language-idiomatic execution/packaging call and in the resulting executable/job
 payload.
 
+HTTP proxying is transport configuration, not backend capability metadata. If
+present, `corsProxy` applies only to outbound HTTP requests made by cloud
+backends. For TypeScript/JavaScript implementations, when
+`corsProxy.enabled = true`, automatically detect whether the code is running in
+a browser. If `mode = "browser-only"`, only browser-side fetches are rewritten
+to `corsProxy.baseUrl + originalUrl`; Node/Deno/server runtimes continue to use
+the original URL. Use `https://proxy.corsfix.com/?` as the default proxy base
+URL for TypeScript/JavaScript implementations. The mechanism must be opt-in and
+explicitly disableable.
+
 **Tests (minimum 10):**
 
 - Verify `ClassicalRegister` creation, flat offsets, and declaration order.
@@ -276,10 +293,16 @@ payload.
   `numClassicalRegisters`.
 - Verify BlochCoordinates struct field ranges.
 - Verify BackendConfiguration creation with and without coupling map.
+- Verify optional `corsProxy` configuration defaults to disabled and supports
+  `browser-only` and `always` modes.
 - Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and
   exactly one of `bearerToken` or `apiKey`.
 - Verify shot count is modeled as a per-execution/per-job input rather than a
   `BackendConfiguration` field.
+- Verify TypeScript/JavaScript browser-runtime URL rewriting uses
+  `https://proxy.corsfix.com/?<originalUrl>` only when
+  `corsProxy.enabled =
+  true`, and remains direct when disabled.
 - Verify total `numClbits` equals the sum of named classical register sizes.
 - Edge cases: 0 qubits, 0 classical bits, empty instructions list, empty
   classical-register list.
@@ -1540,6 +1563,34 @@ everywhere for direct bearer-token authentication. Do not introduce alternate
 names such as `ibmApiVersion` or `apiToken` in configuration structs, executable
 metadata, helper functions, or tests.
 
+**Optional corsfix transport (TypeScript/JavaScript)**
+
+For TypeScript/JavaScript implementations, add a request-URL helper used by
+every outbound fetch call (IAM token exchange, job submit, job status, and job
+results):
+
+```
+buildRequestUrl(originalUrl) {
+  proxy = configuration.corsProxy
+  if proxy is null or proxy.enabled is not true:
+    return originalUrl
+
+  isBrowser = runtime automatically detects browser environment
+  if proxy.mode == "browser-only" and not isBrowser:
+    return originalUrl
+
+  return proxy.baseUrl + originalUrl
+}
+```
+
+Use `https://proxy.corsfix.com/?` as the default `proxy.baseUrl`. The original
+fully-qualified URL string is appended directly after the `?`, for example
+`https://proxy.corsfix.com/?https://quantum.cloud.ibm.com/api/v1/jobs`. This
+mechanism must be explicitly configured, may be disabled at any time, and must
+not alter the HTTP method, headers, body, or response parsing semantics. Other
+languages should preserve the configuration shape even if they do not need a
+browser-specific CORS workaround.
+
 #### `transpileAndPackage(circuit, shots = 1024) -> IBMExecutable`
 
 **Phase 1: Build Target Description**
@@ -1631,6 +1682,11 @@ apiConfig = {
   "iamTokenEndpoint": "https://iam.cloud.ibm.com/identity/token",
   "bearerToken": configuration.bearerToken ?? null,
   "apiKey": configuration.apiKey ?? null,
+  "corsProxy": configuration.corsProxy ?? {
+    "enabled": false,
+    "mode": "browser-only",
+    "baseUrl": "https://proxy.corsfix.com/?"
+  },
   "serviceCrn": configuration.serviceCrn,
   "apiVersion": configuration.apiVersion,
   "headers": {
@@ -1662,6 +1718,10 @@ IBMExecutable {
 ```
 
 #### `execute(executable) -> ExecutionResult`
+
+Before each fetch, pass the fully-qualified request URL through
+`buildRequestUrl(...)` when the TypeScript/JavaScript implementation supports
+the optional `corsProxy` configuration described above.
 
 1. **Resolve bearer token:** If `configuration.bearerToken` is present, use it
    directly. Otherwise, if no unexpired IAM bearer token is cached, call the IAM
@@ -1770,6 +1830,10 @@ Tests that can run without credentials (using the transpilation pipeline only):
   expose the IAM token endpoint, and include the required headers
   (`Authorization`, `Service-CRN`, `Accept`, `Content-Type`, `IBM-API-Version`)
   plus routes.
+- Verify optional `corsProxy` config is preserved in API config, defaults to
+  disabled, and for TypeScript/JavaScript rewrites IAM and IBM runtime request
+  URLs to `https://proxy.corsfix.com/?<originalUrl>` only in browser runtime
+  when enabled.
 - Verify `IBMExecutable` contains all required fields, including ordered named
   classical-register metadata for result reconstruction.
 - Verify polling logic accepts status from either `status` or `state.status` and
@@ -1821,6 +1885,16 @@ QBraidBackend(configuration: QBraidBackendConfiguration)
 - `numQubits`: from configuration.
 - `basisGates`: from configuration.
 - `couplingMap`: from configuration.
+
+**Optional corsfix transport (TypeScript/JavaScript)**
+
+For TypeScript/JavaScript implementations, add the same `buildRequestUrl` helper
+described in the IBM backend section and use it for every outbound fetch call
+(device discovery, submit, status, and results). When `configuration.corsProxy`
+is enabled, browser runtimes prepend `proxy.baseUrl` to the fully-qualified
+request URL; when it is disabled, or when `mode = "browser-only"` and the code
+is not running in a browser, use the original URL directly. Use
+`https://proxy.corsfix.com/?` as the default `proxy.baseUrl`.
 
 #### `transpileAndPackage(circuit, shots = 1024) -> QBraidExecutable`
 
@@ -1891,6 +1965,11 @@ Construct API configuration (default endpoint:
 apiConfig = {
   "endpoint": configuration.apiEndpoint,  // default: "https://api-v2.qbraid.com/api/v1"
   "apiKey": configuration.apiKey,
+  "corsProxy": configuration.corsProxy ?? {
+    "enabled": false,
+    "mode": "browser-only",
+    "baseUrl": "https://proxy.corsfix.com/?"
+  },
   "headers": {
     "X-API-KEY": configuration.apiKey,
     "Content-Type": "application/json"
@@ -1920,6 +1999,10 @@ QBraidExecutable {
 
 All qBraid API v2 responses are wrapped in a `{ success, data }` envelope. Do
 **not** assume flattened top-level response fields.
+
+Before each fetch, pass the fully-qualified request URL through
+`buildRequestUrl(...)` when the TypeScript/JavaScript implementation supports
+the optional `corsProxy` configuration described above.
 
 1. **Submit job:** POST to `endpoint + routes.submit` with payload as body.
    Parse the submission response from its `{ success, data }` envelope, verify
@@ -1975,6 +2058,10 @@ Tests that can run without credentials (using the transpilation pipeline only):
   shot count.
 - Verify API config has correct headers (`X-API-KEY`), device-discovery route,
   and job routes.
+- Verify optional `corsProxy` config is preserved in API config, defaults to
+  disabled, and for TypeScript/JavaScript rewrites device discovery and qBraid
+  job request URLs to `https://proxy.corsfix.com/?<originalUrl>` only in browser
+  runtime when enabled.
 - Verify `QBraidExecutable` contains all required fields.
 - Verify qBraid response parsing uses the `{ success, data }` envelope rather
   than assuming flattened responses, using mock fixtures for submit, status, and
@@ -2231,6 +2318,7 @@ decomposeZYZ, decomposeToRzSx, decomposeKAK
 // Types
 ClassicalRegister, ClassicalBitRef,
 Instruction, Condition, CircuitComplexity, BlochCoordinates,
+CorsProxyConfiguration,
 BackendConfiguration, IBMBackendConfiguration, QBraidBackendConfiguration,
 QubitProperties, GateProperties, Target,
 ExecutionResult, SerializedCircuit
@@ -2325,9 +2413,10 @@ The README must contain the following sections in order:
 
    - **Types** — All exported types/interfaces with their fields:
      `ClassicalRegister`, `ClassicalBitRef`, `Instruction`, `Condition`,
-     `CircuitComplexity`, `BlochCoordinates`, `BackendConfiguration`,
-     `IBMBackendConfiguration`, `QBraidBackendConfiguration`, `QubitProperties`,
-     `GateProperties`, `Target`, `ExecutionResult`, `SerializedCircuit`.
+     `CircuitComplexity`, `BlochCoordinates`, `CorsProxyConfiguration`,
+     `BackendConfiguration`, `IBMBackendConfiguration`,
+     `QBraidBackendConfiguration`, `QubitProperties`, `GateProperties`,
+     `Target`, `ExecutionResult`, `SerializedCircuit`.
 
 5. **Usage Examples** — One short, self-contained code example for each of the
    following scenarios:
@@ -2721,6 +2810,10 @@ Before declaring the library done, verify:
 - [ ] qBraid payload structure matches specification for the selected supported
       `runInputType` (for example, a qasm3-capable device uses per-job `shots`,
       `deviceQrn`, and `program`).
+- [ ] Optional backend `corsProxy` configuration exists, defaults to disabled,
+      is preserved in executable/API config, and for TypeScript/JavaScript
+      browser runtimes rewrites outbound fetch URLs to
+      `https://proxy.corsfix.com/?<originalUrl>` only when enabled.
 - [ ] qBraid executable contains API config with X-API-KEY header,
       device-discovery route, `runInputTypes` validation/discovery before
       packaging, `{ success, data }` response parsing, `data.jobQrn`,
