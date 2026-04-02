@@ -22,9 +22,10 @@ The specification covers:
 | ⚡ **State-Vector Simulator** | Born-rule measurement, subspace iteration, mid-circuit measurement support                      |
 | 🔀 **Transpilation Pipeline** | SABRE layout/routing, ZYZ & KAK decomposition, basis gate translation, optimization passes      |
 | ☁️ **IBM Backend**            | Full transpilation + OpenQASM 3 serialization + cloud API integration                           |
+| ☁️ **qBraid Backend**         | Full transpilation + OpenQASM 3 serialization + qBraid API v2 integration                       |
 | 🌐 **Bloch Sphere**           | Qubit state introspection via reduced density matrices                                          |
 | 📝 **OpenQASM 3**             | Complete serialize/deserialize implementation                                                   |
-| ✅ **530+ Tests**             | Exhaustive test plan with statistical verification                                              |
+| ✅ **550+ Tests**             | Exhaustive test plan with statistical verification                                              |
 
 > [!NOTE]
 > The AI will **ask you which programming language** to use before writing any
@@ -303,6 +304,7 @@ graph TD
     G --> H[8. 🖥️ Simulator Engine]
     G --> I[9. 🔀 Transpiler Pipeline]
     I --> J[10. ☁️ IBM Backend]
+    I --> J2[10b. ☁️ qBraid Backend]
     H --> K[11. 🌐 Bloch Sphere]
     H --> L[12. 📝 OpenQASM 3 Serializer]
     L --> M[13. 📤 Public API Surface]
@@ -312,6 +314,7 @@ graph TD
     style H fill:#ff6b6b,color:#fff
     style I fill:#ffa94d,color:#fff
     style J fill:#845ef7,color:#fff
+    style J2 fill:#228be6,color:#fff
 ```
 
 Each step **must have passing tests** before proceeding to the next.
@@ -320,22 +323,23 @@ Each step **must have passing tests** before proceeding to the next.
 
 ## 📊 Test Coverage Summary
 
-| Module      | Min. Tests |         Category         |
-| :---------- | :--------: | :----------------------: |
-| Types       |     10     |           Unit           |
-| Complex     |     40     |           Unit           |
-| Matrix      |     45     |           Unit           |
-| Gates       |     80     |           Unit           |
-| Parameters  |     15     |           Unit           |
-| Circuit     |     40     |           Unit           |
-| Backend     |     5      |           Unit           |
-| Simulator   |     60     |           Unit           |
-| Transpiler  |     40     |           Unit           |
-| IBM Backend |     20     | Unit (partially skipped) |
-| Bloch       |     20     |           Unit           |
-| Serializer  |     25     |           Unit           |
-| Integration |    130     |        End-to-end        |
-| **Total**   |  **530+**  |            ✅            |
+| Module         | Min. Tests |         Category         |
+| :------------- | :--------: | :----------------------: |
+| Types          |     10     |           Unit           |
+| Complex        |     40     |           Unit           |
+| Matrix         |     45     |           Unit           |
+| Gates          |     80     |           Unit           |
+| Parameters     |     15     |           Unit           |
+| Circuit        |     40     |           Unit           |
+| Backend        |     5      |           Unit           |
+| Simulator      |     60     |           Unit           |
+| Transpiler     |     40     |           Unit           |
+| IBM Backend    |     20     | Unit (partially skipped) |
+| qBraid Backend |     20     | Unit (partially skipped) |
+| Bloch          |     20     |           Unit           |
+| Serializer     |     25     |           Unit           |
+| Integration    |    130     |        End-to-end        |
+| **Total**      |  **550+**  |            ✅            |
 
 ---
 
