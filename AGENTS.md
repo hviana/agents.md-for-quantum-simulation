@@ -443,7 +443,7 @@ following — no omissions.
 | `pauliY()`           | Y           | `[[0, -i], [i, 0]]`                                                                  |
 | `pauliZ()`           | Z           | `[[1, 0], [0, -1]]`                                                                  |
 | `pGate(lambda)`      | P(l)        | `[[1, 0], [0, exp(i*l)]]`                                                            |
-| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -e^(i*ph)*sin(th/2)*i], [e^(-i*ph)*sin(th/2)*i, cos(th/2)]]`           |
+| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -e^(-i*ph)*sin(th/2)*i], [-e^(i*ph)*sin(th/2)*i, cos(th/2)]]`          |
 | `rxGate(theta)`      | RX(th)      | `[[cos(th/2), -i*sin(th/2)], [-i*sin(th/2), cos(th/2)]]`                             |
 | `ryGate(theta)`      | RY(th)      | `[[cos(th/2), -sin(th/2)], [sin(th/2), cos(th/2)]]`                                  |
 | `rzGate(theta)`      | RZ(th)      | `[[exp(-i*th/2), 0], [0, exp(i*th/2)]]`                                              |
@@ -540,19 +540,19 @@ Below are the explicit matrices for every two-qubit gate:
 
 ```
 [[1, 0, 0, 0],
+ [0, 0, 1, 0],
  [0, 0, 0, 1],
- [0, 1, 0, 0],
- [0, 0, 1, 0]]
+ [0, 1, 0, 0]]
 ```
 
 **ECR:**
 
 ```
 (1/sqrt(2)) *
-[[0,  1,  0,  i],
- [1,  0, -i,  0],
- [0,  i,  0,  1],
- [-i, 0,  1,  0]]
+[[0,  0,  1,  i],
+ [0,  0,  i,  1],
+ [1, -i,  0,  0],
+ [-i, 1,  0,  0]]
 ```
 
 **SWAP:**
@@ -683,10 +683,10 @@ subspace (control=1).
 **RZX(th):**
 
 ```
-[[cos(th/2),     0,            -i*sin(th/2), 0            ],
- [0,             cos(th/2),    0,            i*sin(th/2)  ],
- [-i*sin(th/2),  0,            cos(th/2),    0            ],
- [0,             i*sin(th/2),  0,            cos(th/2)    ]]
+[[cos(th/2),     -i*sin(th/2), 0,            0            ],
+ [-i*sin(th/2),  cos(th/2),    0,            0            ],
+ [0,             0,            cos(th/2),    i*sin(th/2)  ],
+ [0,             0,            i*sin(th/2),  cos(th/2)    ]]
 ```
 
 **XX-YY(th, beta):**
@@ -779,7 +779,8 @@ matrix. This creates pairwise XX interactions among all qubit pairs.
 | `pauliGate(pauliString)` | Pauli | Tensor product of Pauli matrices |
 
 Given a string like `"XYZ"`, computes `X tensor Y tensor Z`. The string is read
-**right-to-left**: the rightmost character acts on the first qubit in the list.
+**left-to-right**: the leftmost character acts on the first qubit in the list
+(MSB of the gate matrix index).
 
 #### Verification Requirements for Gates
 
