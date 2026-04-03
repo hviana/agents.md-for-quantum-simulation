@@ -25,14 +25,22 @@ language.
 - Provides introspection (state vectors, Bloch sphere coordinates, circuit
   complexity metrics).
 - Supports symbolic parameters with arithmetic expressions, bound at run time.
-- Supports classical control flow: `if_test`, `for_loop`, `while_loop`,
-  `switch`, `break_loop`, `continue_loop`, and `box`.
-- Supports circuit composition: `compose`, `to_gate`, `to_instruction`,
-  `append`, `inverse`.
+- Supports classical control flow: `ifTest`, `forLoop`, `whileLoop`, `switch`,
+  `breakLoop`, `continueLoop`, and `box`.
+- Supports circuit composition: `compose`, `toGate`, `toInstruction`, `append`,
+  `inverse`.
 - Exposes a Backend interface with a full `SimulatorBackend`, `IBMBackend`, and
   `QBraidBackend` implementation (including a complete transpilation pipeline).
 - Serializes/deserializes circuits to/from **OpenQASM 3** via a public
-  Serializer interface.
+  Serializer interface with **comprehensive OpenQASM 3 language coverage**
+  including: classical typed variables (`bool`, `int[n]`, `uint[n]`, `float[n]`,
+  `angle[n]`, `const`), `input`/`output` declarations, custom `gate`
+  definitions, gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`),
+  classical expressions (arithmetic, bitwise, comparison, logical operators),
+  `array` types, subroutines (`def`), `extern` declarations,
+  `pragma`/annotations, timing literals, built-in constants (`pi`, `tau`,
+  `euler`), built-in math functions, casting, indexing/slicing, gate
+  broadcasting, and physical qubit references (`$0`).
 - Exposes the underlying Complex and Matrix algebra as public API.
 
 ### Non-Negotiable Constraint
@@ -182,6 +190,8 @@ Instruction {
   params: (number | Param)[]   // Numeric or symbolic parameters (angles)
   condition?: Condition        // Classical condition (for if_test)
   label?: string               // Optional label for custom gates
+  modifiers?: GateModifier[]   // Gate modifiers: ctrl @, negctrl @, inv @, pow(k) @
+  annotations?: Annotation[]   // Annotations attached to this instruction
 }
 
 Condition {
@@ -262,6 +272,69 @@ Target {
 ExecutionResult = map<string, number>  // bitstring -> percentage (0-100); if multiple classical registers exist, flatten by concatenating register segments in declared order
 
 SerializedCircuit = string  // OpenQASM 3 program text
+
+// --- OpenQASM 3 Classical Type System ---
+// These types model the full OpenQASM 3 classical type system for the
+// serializer/deserializer. They are used internally by OpenQASM3Serializer
+// and exposed publicly so users can inspect deserialized programs.
+
+ClassicalType = "bit" | "bool" | "int" | "uint" | "float" | "angle"
+                | "complex" | "duration" | "stretch"
+
+ClassicalVariable {
+  name: string
+  type: ClassicalType
+  size: number | null          // Bit width (e.g., 32 for int[32]); null for unsized
+  isConst: boolean             // true for `const` declarations
+  isInput: boolean             // true for `input` declarations
+  isOutput: boolean            // true for `output` declarations
+  initValue: any | null        // Initial value expression, if present
+}
+
+GateDefinition {
+  name: string                 // Gate name
+  params: string[]             // Parameter names (angle parameters)
+  qubits: string[]             // Qubit argument names
+  body: Instruction[]          // Gate body instructions
+}
+
+GateModifier {
+  type: "ctrl" | "negctrl" | "inv" | "pow"
+  argument: number | null      // Number of controls for ctrl/negctrl; exponent for pow; null for inv
+}
+
+SubroutineDefinition {
+  name: string
+  params: SubroutineParam[]    // Classical and quantum parameters
+  returnType: ClassicalType | null  // null for void
+  body: Instruction[]
+}
+
+SubroutineParam {
+  name: string
+  type: ClassicalType | "qubit" | "qubit[]"
+  size: number | null
+  isMutable: boolean           // For array params: readonly vs mutable
+}
+
+ExternDeclaration {
+  name: string
+  params: SubroutineParam[]
+  returnType: ClassicalType | null
+}
+
+ArrayType {
+  baseType: ClassicalType      // int, uint, float, complex, angle, bool, duration
+  dimensions: number[]         // Up to 7 dimensions
+}
+
+Pragma {
+  content: string              // Raw pragma text after "pragma " keyword
+}
+
+Annotation {
+  content: string              // Raw annotation text after "@" symbol
+}
 ```
 
 The circuit model must preserve `ClassicalRegister[]` in declaration order. Flat
@@ -283,11 +356,13 @@ the original URL. Use `https://proxy.corsfix.com/?` as the default proxy base
 URL for TypeScript/JavaScript implementations. The mechanism must be opt-in and
 explicitly disableable.
 
-**Tests (minimum 10):**
+**Tests (minimum 15):**
 
 - Verify `ClassicalRegister` creation, flat offsets, and declaration order.
 - Verify `ClassicalBitRef` creation and flat-index mapping.
 - Verify Instruction creation with flat `clbits` and named `clbitRefs`.
+- Verify Instruction with `modifiers` field (ctrl, negctrl, inv, pow).
+- Verify Instruction with `annotations` field.
 - Verify Condition with single bit, multi-bit register, and named register.
 - Verify CircuitComplexity struct defaults and field types, including
   `numClassicalRegisters`.
@@ -297,6 +372,15 @@ explicitly disableable.
   `browser-only` and `always` modes.
 - Verify IBMBackendConfiguration includes `serviceCrn`, `apiVersion`, and
   exactly one of `bearerToken` or `apiKey`.
+- Verify `ClassicalVariable` creation for each `ClassicalType` (bit, bool, int,
+  uint, float, angle, complex, duration, stretch) with size, const, input, and
+  output flags.
+- Verify `GateDefinition` creation with params and qubit args.
+- Verify `GateModifier` for each type: ctrl(n), negctrl(n), inv, pow(k).
+- Verify `SubroutineDefinition` and `ExternDeclaration` with params and return
+  type.
+- Verify `ArrayType` with base types and up to 7 dimensions.
+- Verify `Pragma` and `Annotation` creation.
 - Verify shot count is modeled as a per-execution/per-job input rather than a
   `BackendConfiguration` field.
 - Verify TypeScript/JavaScript browser-runtime URL rewriting uses
@@ -457,7 +541,7 @@ following — no omissions.
 | `u1Gate(lambda)`     | U1(l)       | Equivalent to `pGate(l)`: `[[1, 0], [0, exp(i*l)]]`                                  |
 | `u2Gate(phi, l)`     | U2(ph,l)    | `(1/sqrt(2)) * [[1, -exp(i*l)], [exp(i*ph), exp(i*(ph+l))]]`                         |
 | `u3Gate(th, ph, l)`  | U3(th,ph,l) | Identical to `uGate(th, ph, l)`                                                      |
-| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle                                           |
+| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle \|v\|                                     |
 
 **RV Gate formula:** Let `angle = |v|/2`, `n = v/|v|` (unit vector). If |v| = 0,
 return identity.
@@ -752,13 +836,13 @@ bit1=ctrl3, bit0=target): `entry [12][12] = i`, `entry [13][13] = -i`,
 These are **functions** (not fixed-size matrices) that construct the appropriate
 matrix at call time based on the number of control qubits:
 
-| Function                         | Gate | Description        |
-| -------------------------------- | ---- | ------------------ |
-| `mcxGateN(numControls)`          | MCX  | N-controlled X     |
-| `mcpGateN(lambda, numControls)`  | MCP  | N-controlled Phase |
-| `mcrxGateN(theta, numControls)`  | MCRX | N-controlled RX    |
-| `mcryGateN(theta, numControls)`  | MCRY | N-controlled RY    |
-| `mcrzGateN(lambda, numControls)` | MCRZ | N-controlled RZ    |
+| Function                        | Gate | Description        |
+| ------------------------------- | ---- | ------------------ |
+| `mcxGateN(numControls)`         | MCX  | N-controlled X     |
+| `mcpGateN(lambda, numControls)` | MCP  | N-controlled Phase |
+| `mcrxGateN(theta, numControls)` | MCRX | N-controlled RX    |
+| `mcryGateN(theta, numControls)` | MCRY | N-controlled RY    |
+| `mcrzGateN(theta, numControls)` | MCRZ | N-controlled RZ    |
 
 For N controls, the matrix is `2^(N+1) x 2^(N+1)`: identity everywhere except
 the last two rows/columns where the base gate's 2x2 matrix is applied.
@@ -987,13 +1071,36 @@ chaining). Angle parameters accept `number | Param`.
 - `qc.mcp(lambda, controlQubits, target)`
 - `qc.mcrx(theta, controlQubits, target)`
 - `qc.mcry(theta, controlQubits, target)`
-- `qc.mcrz(lambda, controlQubits, target)`
+- `qc.mcrz(theta, controlQubits, target)`
 
 **Special Gates:**
 
 - `qc.ms(theta, qubits)` — Molmer-Sorensen
 - `qc.pauli(pauliString, qubits)` — Pauli string gate
 - `qc.unitary(matrix, qubits)` — arbitrary unitary matrix
+
+**Gate Modifiers (OpenQASM 3):**
+
+- `qc.ctrl(numControls, gate, controlQubits, targetQubits)` — apply `ctrl @`
+  modifier. Creates a controlled version of any gate. `numControls` defaults
+  to 1. The modifier is stored on the instruction and expanded during
+  transpilation or simulation.
+- `qc.negctrl(numControls, gate, controlQubits, targetQubits)` — apply
+  `negctrl @` modifier. Conditions on control qubits being |0> instead of |1>.
+- `qc.inv(gate, qubits)` — apply `inv @` modifier. Replaces gate U with U†.
+- `qc.pow(k, gate, qubits)` — apply `pow(k) @` modifier. Applies gate to the kth
+  power. Positive integer k repeats; negative k repeats inverse.
+
+Gate modifiers can be chained: `ctrl @ inv @ U` means controlled-inverse-U.
+Multiple modifiers are stored in order on the instruction's `modifiers` field
+and applied from right to left (innermost first) during simulation.
+
+**Custom Gate Definitions (OpenQASM 3):**
+
+- `qc.defineGate(name, params, qubits, body)` — define a custom gate from a
+  `QuantumCircuit` body. Parameters are angle-typed. This is the programmatic
+  equivalent of the OpenQASM 3 `gate` statement and stores a `GateDefinition`.
+  Defined gates can be used via `qc.append(name, ...)`.
 
 **State Preparation:**
 
@@ -1012,6 +1119,57 @@ chaining). Angle parameters accept `number | Param`.
 - `qc.reset(qubit)`
 - `qc.barrier(...qubits)` — optimization fence, no state effect
 - `qc.delay(duration, qubit, unit)` — no-op in simulation
+
+**Classical Variable Declarations (OpenQASM 3):**
+
+These methods declare classical typed variables for OpenQASM 3 serialization and
+classical expression support. In simulation, `bit`/`bit[n]` map to the existing
+classical register system; other types are tracked as metadata and participate
+in classical expressions and control flow conditions.
+
+- `qc.declareClassicalVar(name, type, size?, initValue?)` — declare a classical
+  variable. `type` is one of the `ClassicalType` values. `size` is the bit width
+  (required for `int`, `uint`, `float`, `angle`; null for `bool`, `duration`,
+  `stretch`). Optional initial value.
+- `qc.declareConst(name, type, size?, value)` — declare a compile-time constant.
+  Equivalent to `const type[size] name = value;` in OpenQASM 3.
+- `qc.declareInput(name, type, size?)` — declare an input variable. Equivalent
+  to `input type[size] name;` in OpenQASM 3. Input values are provided at
+  execution time (analogous to symbolic `Param` but using the OpenQASM 3 input
+  mechanism).
+- `qc.declareOutput(name, type, size?)` — declare an output variable. Equivalent
+  to `output type[size] name;`. Specifies which classical variables constitute
+  the program output.
+- `qc.declareArray(name, baseType, dimensions, initValue?)` — declare a
+  classical array. Equivalent to `array[baseType, d1, d2, ...] name;`. Up to 7
+  dimensions. Base types: `int`, `uint`, `float`, `complex`, `angle`, `bool`,
+  `duration`.
+
+**Classical Assignment and Expressions (OpenQASM 3):**
+
+- `qc.classicalAssign(target, expression)` — assign a value or expression result
+  to a classical variable. Supports compound assignment operators (`+=`, `-=`,
+  `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`).
+
+**Subroutines and Externs (OpenQASM 3):**
+
+- `qc.defineSubroutine(name, params, returnType, body)` — define a subroutine
+  (`def` in OpenQASM 3). `body` is a `QuantumCircuit`. Parameters can be
+  classical types or qubit references. Return type is a classical type or null
+  for void.
+- `qc.declareExtern(name, params, returnType)` — declare an external function
+  (`extern` in OpenQASM 3). The implementation is provided by the runtime
+  environment.
+- `qc.callSubroutine(name, args, resultVar?)` — call a previously defined
+  subroutine or extern. `resultVar` is the optional variable to assign the
+  return value to.
+
+**Pragma and Annotations (OpenQASM 3):**
+
+- `qc.pragma(content)` — add a pragma directive. Stored as-is and serialized as
+  `pragma <content>;`.
+- `qc.annotate(content)` — attach an annotation to the next instruction.
+  Serialized as `@<content>` preceding the annotated statement.
 
 **Control Flow:**
 
@@ -1064,7 +1222,7 @@ bit array during any circuit transformation.
   `shots` is a per-execution input used when the backend packages a submitted
   job. This is the entry point for compiling a circuit for a specific backend.
 
-**Tests (minimum 40):**
+**Tests (minimum 55):**
 
 - Build a circuit with every single gate type and verify instruction count.
 - Verify chaining: `qc.h(0).cx(0,1).measure(0,0)`.
@@ -1090,6 +1248,26 @@ bit array during any circuit transformation.
 - Verify `unitary()` stores the matrix.
 - Verify `prepareState()` and `initialize()` instructions.
 - Verify `ms()` stores theta and qubit list.
+- Verify `ctrl()` modifier: apply `ctrl @ h` stores instruction with ctrl
+  modifier and correct control/target qubits.
+- Verify `negctrl()` modifier: stores negctrl modifier on instruction.
+- Verify `inv()` modifier: stores inv modifier on instruction.
+- Verify `pow(k)` modifier: stores pow modifier with exponent.
+- Verify chained modifiers: `ctrl @ inv @ U` stores modifiers in order.
+- Verify `defineGate()` stores a `GateDefinition` with name, params, body.
+- Verify defined gates can be appended via `append(gateName, ...)`.
+- Verify `declareClassicalVar()` for each type: bool, int[32], uint[8],
+  float[64], angle[16], duration, stretch.
+- Verify `declareConst()` stores const flag and initial value.
+- Verify `declareInput()` stores input flag.
+- Verify `declareOutput()` stores output flag.
+- Verify `declareArray()` stores base type and dimensions.
+- Verify `classicalAssign()` stores assignment with target and expression.
+- Verify `defineSubroutine()` stores subroutine with params and body.
+- Verify `declareExtern()` stores extern declaration.
+- Verify `callSubroutine()` stores call instruction with args.
+- Verify `pragma()` stores pragma content.
+- Verify `annotate()` attaches annotation to next instruction.
 
 ---
 
@@ -1331,11 +1509,42 @@ passes that transform a `QuantumCircuit` to satisfy a `Target`'s constraints.
 The transpiler is used internally by `IBMBackend.transpileAndPackage()` but is
 also publicly exposed so users can invoke individual passes.
 
-#### Stage 0: Initialization (Unrolling)
+#### Stage 0: Initialization (Unrolling and OpenQASM 3 Feature Expansion)
 
 - Unroll composite gates (sub-circuits used via `toGate` or `toInstruction`)
   into their constituent primitive operations.
 - Unroll control-flow block bodies recursively.
+- **Expand gate modifiers** (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`):
+  - `inv @ U` → replace U with U† (conjugate transpose of the gate matrix).
+  - `pow(k) @ U` → for positive integer k, repeat U k times; for negative k,
+    repeat U† |k| times; for fractional k, compute U^k via matrix
+    diagonalization.
+  - `ctrl(n) @ U` → build the (n+m)-qubit controlled-U gate matrix: identity on
+    all states where any control qubit is |0>, apply U when all control qubits
+    are |1>.
+  - `negctrl(n) @ U` → same as ctrl but conditioned on control qubits being |0>.
+    Implement as X on each negctrl qubit, then ctrl @ U, then X on each negctrl
+    qubit.
+  - Chained modifiers are applied right-to-left (innermost first):
+    `ctrl @ inv @ U` → first compute inv(U) = U†, then build controlled-U†.
+- **Expand custom gate definitions** (`gate` bodies): inline the gate body with
+  parameter substitution. Recursive gate definitions are expanded iteratively
+  until only primitive gates remain.
+- **Inline subroutine calls** (`def` bodies): replace `callSubroutine`
+  instructions with the subroutine body, substituting arguments. Qubit arguments
+  are mapped by reference. Classical arguments are substituted by value.
+  Recursive subroutines are expanded up to a configurable depth limit (default:
+  100).
+- **Evaluate const expressions**: Replace `const` variable references with their
+  compile-time values.
+- **Resolve input variables**: If `input` values are provided (via parameter
+  binding), substitute them. Unresolved inputs remain symbolic.
+- **Strip pragmas and annotations**: Remove pragma directives and annotations
+  that are not relevant to the target backend. Preserve backend-specific pragmas
+  if recognized.
+- **Expand gate broadcasting**: If a gate is applied to a register (multiple
+  qubits) rather than individual qubits, expand into per-qubit gate
+  applications.
 
 #### Stage 1: High-Level Synthesis
 
@@ -1497,7 +1706,15 @@ e) Iterate until no more reductions or max iterations reached.
 #### Public Functions
 
 - `transpile(circuit, target) -> QuantumCircuit` — run the full pipeline.
-- `unrollComposites(circuit) -> QuantumCircuit` — Stage 0.
+- `unrollComposites(circuit) -> QuantumCircuit` — Stage 0 (includes gate
+  modifier expansion, custom gate inlining, subroutine inlining, const
+  evaluation, input resolution, pragma stripping, and gate broadcasting).
+- `expandGateModifiers(circuit) -> QuantumCircuit` — expand `ctrl @`,
+  `negctrl @`, `inv @`, `pow(k) @` modifiers into primitive gates.
+- `inlineGateDefinitions(circuit) -> QuantumCircuit` — inline custom `gate`
+  definitions.
+- `inlineSubroutines(circuit) -> QuantumCircuit` — inline `def` subroutine
+  calls.
 - `synthesizeHighLevel(circuit) -> QuantumCircuit` — Stage 1.
 - `layoutSABRE(circuit, couplingMap) -> {circuit, layout}` — Stage 2.
 - `routeSABRE(circuit, couplingMap, layout) -> QuantumCircuit` — Stage 3.
@@ -1507,7 +1724,7 @@ e) Iterate until no more reductions or max iterations reached.
 - `decomposeToRzSx(matrix) -> Instruction[]` — Decompose to {RZ, SX} basis.
 - `decomposeKAK(matrix) -> Instruction[]` — KAK/Weyl decomposition.
 
-**Tests (minimum 40):**
+**Tests (minimum 55):**
 
 - **ZYZ decomposition:** Decompose H, X, Y, Z, S, T, RX(pi/4), arbitrary U ->
   recompose -> verify equals original matrix (within epsilon).
@@ -1534,6 +1751,34 @@ e) Iterate until no more reductions or max iterations reached.
 - **Composite unrolling:** Circuit with `toGate` sub-circuit -> unroll -> verify
   flattened.
 - **Identity removal:** Verify Rz(0) and similar are removed after optimization.
+- **Gate modifier expansion — `ctrl @`:** `ctrl @ h` on 2 qubits produces a
+  CH-equivalent circuit. Verify by simulating on all basis states.
+- **Gate modifier expansion — `ctrl(2) @`:** `ctrl(2) @ x` on 3 qubits produces
+  a CCX-equivalent circuit. Verify Toffoli truth table.
+- **Gate modifier expansion — `negctrl @`:** `negctrl @ x` on 2 qubits flips
+  target when control is |0>. Verify on all basis states.
+- **Gate modifier expansion — `inv @`:** `inv @ s` produces Sdg. Verify matrix
+  equivalence.
+- **Gate modifier expansion — `pow(k) @`:** `pow(2) @ s` produces Z. Verify
+  matrix equivalence. `pow(2) @ t` produces S.
+- **Chained modifiers:** `ctrl @ inv @ s` produces controlled-Sdg. Verify on
+  basis states.
+- **Custom gate inlining:** Define a gate `bell(q0, q1) { h q0; cx q0, q1; }`,
+  use it, unroll -> verify equivalent to H + CX.
+- **Parameterized custom gate inlining:** Define
+  `myrz(theta, q) { rz(theta) q; }`, bind parameter, unroll -> verify.
+- **Subroutine inlining:** Define a subroutine with quantum operations, call it,
+  inline -> verify expanded instructions.
+- **Const evaluation:** Circuit with const-declared angles -> verify const
+  values are substituted during unrolling.
+- **Input resolution:** Circuit with `input` variables -> bind values -> verify
+  substitution.
+- **Gate broadcasting expansion:** Gate applied to register of 3 qubits ->
+  unroll -> verify 3 individual gate applications.
+- **Pragma stripping:** Circuit with pragmas -> unroll -> verify pragmas removed
+  from transpiled output.
+- **Annotation stripping:** Circuit with annotations -> unroll -> verify
+  annotations removed from transpiled output.
 
 ---
 
@@ -1614,10 +1859,13 @@ for each gate in configuration.basisGates:
 
 Use the transpiler module:
 
-1. Decompose all gates to basis gate set (Stage 4).
-2. Layout and routing for coupling map via SABRE (Stages 2-3).
-3. Optimize gate count (Stage 5).
-4. Validate: every gate is in basis, every 2-qubit gate on a connected pair.
+1. Unroll composite gates — sub-circuits, `toGate`, `toInstruction` (Stage 0).
+2. Synthesize high-level operations — decompose 3+ qubit gates, multi-controlled
+   gates, and SWAP into 1- and 2-qubit gates (Stage 1).
+3. Layout and routing for coupling map via SABRE (Stages 2-3).
+4. Decompose all gates to basis gate set (Stage 4).
+5. Optimize gate count (Stage 5).
+6. Validate: every gate is in basis, every 2-qubit gate on a connected pair.
 
 **Phase 3: Serialize and Package**
 
@@ -1868,7 +2116,7 @@ Tests that require credentials (skipped by default):
 
 ---
 
-### Step 10b: qBraid Backend
+### Step 11: qBraid Backend
 
 **File:** `src/qbraid_backend.{ext}`
 
@@ -1930,10 +2178,13 @@ for each gate in configuration.basisGates:
 
 Use the transpiler module:
 
-1. Decompose all gates to basis gate set (Stage 4).
-2. Layout and routing for coupling map via SABRE (Stages 2-3).
-3. Optimize gate count (Stage 5).
-4. Validate: every gate is in basis, every 2-qubit gate on a connected pair.
+1. Unroll composite gates — sub-circuits, `toGate`, `toInstruction` (Stage 0).
+2. Synthesize high-level operations — decompose 3+ qubit gates, multi-controlled
+   gates, and SWAP into 1- and 2-qubit gates (Stage 1).
+3. Layout and routing for coupling map via SABRE (Stages 2-3).
+4. Decompose all gates to basis gate set (Stage 4).
+5. Optimize gate count (Stage 5).
+6. Validate: every gate is in basis, every 2-qubit gate on a connected pair.
 
 **Phase 3: Serialize and Package**
 
@@ -1991,6 +2242,7 @@ QBraidExecutable {
   payload: object              // Complete JSON-serializable job submission body
   apiConfig: object            // Auth, endpoint, headers, route templates
   compiledCircuit: QuantumCircuit  // For optional inspection
+  classicalRegisters: ClassicalRegister[]  // Ordered named classical-register layout (for consistency with IBMExecutable; qBraid result parsing uses flat measurementCounts but this preserves register metadata for the caller)
   target: Target
   numClbits: number
 }
@@ -2095,7 +2347,7 @@ Tests that require credentials (skipped by default):
 
 ---
 
-### Step 11: Bloch Sphere Introspection
+### Step 12: Bloch Sphere Introspection
 
 **File:** `src/bloch.{ext}`
 
@@ -2153,7 +2405,7 @@ Tests that require credentials (skipped by default):
 
 ---
 
-### Step 12: Serializer — OpenQASM 3
+### Step 13: Serializer — OpenQASM 3
 
 **File:** `src/serializer.{ext}`
 
@@ -2173,20 +2425,52 @@ other formats.
 
 #### OpenQASM3Serializer
 
-Implements the `Serializer` interface for OpenQASM 3 format.
+Implements the `Serializer` interface for OpenQASM 3 format. Must handle the
+**complete OpenQASM 3 language** as defined below — not just the subset used by
+the circuit builder's gate methods.
 
 **`serialize(circuit) -> string`**
 
-Produces a valid OpenQASM 3 program:
+Produces a valid OpenQASM 3 program. Example showing many features:
 
 ```
 OPENQASM 3.0;
 include "stdgates.inc";
-qubit[N] q;
+
+// Type declarations
+qubit[4] q;
 bit[1] flag;
 bit[1] data;
+bool outcome;
+int[32] counter = 0;
+uint[8] idx;
+float[64] angle_val = 1.5708;
+const float[64] MY_PI = 3.14159265358979;
+input angle[32] param1;
+output bit[2] result;
+array[int[32], 4] counts = {0, 0, 0, 0};
 
-// Gate instructions
+// Custom gate definition
+gate mygate(theta) q0, q1 {
+  rz(theta) q0;
+  cx q0, q1;
+}
+
+// Subroutine definition
+def apply_bell(qubit q0, qubit q1) {
+  h q0;
+  cx q0, q1;
+}
+
+// Gate modifiers
+ctrl @ h q[0], q[1];
+ctrl(2) @ x q[0], q[1], q[2];
+negctrl @ x q[0], q[1];
+inv @ s q[0];
+pow(2) @ t q[0];
+ctrl @ inv @ s q[0], q[1];
+
+// Standard gate instructions
 rz(1.5708) q[0];
 sx q[0];
 cx q[0], q[1];
@@ -2197,9 +2481,22 @@ barrier q[0], q[1];
 delay[100ns] q[2];
 gphase(0.7854);
 
+// Physical qubit references
+cx $0, $1;
+
+// Classical expressions and assignment
+counter = counter + 1;
+counter += 1;
+idx = counter % 4;
+outcome = (flag[0] == 1) && (data[0] == 0);
+
 // Control flow
 if (flag[0] == 1) {
   x q[1];
+} else if (outcome) {
+  y q[1];
+} else {
+  z q[1];
 }
 while (flag[0] == 0) {
   h q[0];
@@ -2208,51 +2505,211 @@ while (flag[0] == 0) {
 for int i in {0, 1, 2} {
   rz(i * 0.5) q[0];
 }
+for uint j in [0:3] {
+  x q[j];
+}
 switch (data) {
   case 0: { x q[0]; }
+  case 1: { y q[0]; }
   default: { h q[0]; }
 }
+
+// Subroutine call
+apply_bell q[0], q[1];
+
+// Custom gate use
+mygate(pi/4) q[2], q[3];
+
+// Gate broadcasting
+h q;
+
+// Pragma and annotations
+pragma ibm.noise_model depolarizing
+@openqasm.scheduled
+cx q[0], q[1];
 ```
 
-**Rules:**
+**Complete Serialization Rules:**
+
+**Header and declarations:**
 
 - First line: `OPENQASM 3.0;`
 - Second line: `include "stdgates.inc";`
-- `qubit[N] q;` declares N qubits
+- `qubit[N] q;` declares N qubits (virtual qubits)
 - `bit[M] name;` declares one named classical register
 - Emit one `bit[...] name;` declaration per classical register in circuit order.
   If a circuit contains multiple named classical registers, preserve them as
   separate declarations; do **not** merge them into a single synthetic register
   during serialization.
+
+**Classical type declarations:**
+
+- `bool name;` or `bool name = value;`
+- `int[size] name;` or `int[size] name = value;`
+- `uint[size] name;` or `uint[size] name = value;`
+- `float[size] name;` or `float[size] name = value;`
+- `angle[size] name;` or `angle[size] name = value;`
+- `complex[float[size]] name;`
+- `duration name = value;` (with timing units: `ns`, `us`/`µs`, `ms`, `s`, `dt`)
+- `stretch name;`
+- `const type[size] name = value;`
+- `input type[size] name;`
+- `output type[size] name;`
+- `array[baseType, dim1, dim2, ...] name;` (up to 7 dimensions)
+
+**Built-in constants:**
+
+- `pi` / `π` — 3.14159... (also `tau` / `τ` = 2π, `euler` / `ℇ` = e)
+- Constants are recognized in parameter expressions and emitted by name.
+
+**Integer literals:**
+
+- Decimal: `42`, hex: `0xFF`, octal: `0o77`, binary: `0b1010`
+- Underscores for readability: `1_000_000`
+
+**Bit string literals:** `"01010101"`
+
+**Timing literals:** integer/float + unit: `100ns`, `1.5us`, `200dt`
+
+**Custom gate definitions:**
+
+- `gate name(params) qargs { body }` — serialize gate definitions before use
+- Parameters behave as angle types
+- Empty body = identity gate
+
+**Gate modifiers:**
+
+- `ctrl @ gate qubits;` — controlled gate (1 control qubit)
+- `ctrl(n) @ gate qubits;` — n-controlled gate
+- `negctrl @ gate qubits;` — negative-controlled gate (condition on |0>)
+- `negctrl(n) @ gate qubits;` — n negative controls
+- `inv @ gate qubits;` — inverse of gate
+- `pow(k) @ gate qubits;` — gate to the kth power
+- Modifiers can be chained: `ctrl @ inv @ gate qubits;`
+
+**Gate instructions:**
+
 - Gate format: `gate_name(params) qubit_args;`
   - Parameterized: `rz(1.5708) q[0];`
   - No params: `sx q[0];`
   - Two-qubit: `cx q[0], q[1];`
+- Gate broadcasting: `h q;` applies H to every qubit in register `q`
+
+**Physical qubit references:**
+
+- `$0`, `$1`, etc. — hardware qubit identifiers
+- Used in `defcal` and low-level programs targeting specific hardware
+
+**Non-unitary operations:**
+
 - Measurement: `name[i] = measure q[j];`
 - Reset: `reset q[j];`
 - Barrier: `barrier q[0], q[1], q[2];` (or `barrier q;` for all)
 - Delay: `delay[100ns] q[0];`
 - Global phase: `gphase(0.7854);`
-- Control flow: `if`, `while`, `for`, `switch` with braces; register references
-  must preserve the original classical-register names
-- Parameters are decimal floating-point numbers
-- Symbolic parameters remain as names in the output
+
+**Classical expressions and operators:**
+
+Arithmetic: `+`, `-`, `*`, `/`, `%`, `**` Bitwise: `&`, `|`, `^`, `~`, `<<`,
+`>>` Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=` Logical: `&&`, `||`, `!` Set
+membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
+`*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
+
+**Built-in math functions** (used in expressions):
+
+`arccos`, `arcsin`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`,
+`popcount`, `rotl`, `rotr`, `sin`, `sqrt`, `tan`
+
+**Casting:** `type(expression)` — explicit type conversion
+
+**Indexing and slicing:**
+
+- Element access: `array[i]`, `register[i]`
+- Range slicing: `register[start:stop]`, `register[start:step:stop]`
+- Negative indexing: `array[-1]` (last element)
+
+**Control flow:**
+
+- `if (condition) { body }` — conditional
+- `if (condition) { body } else { body }` — if/else
+- `if (condition) { body } else if (condition) { body } else { body }` — else-if
+  chains
+- `while (condition) { body }` — while loop
+- `for type var in range/set { body }` — for loop
+  - Set iteration: `for int i in {0, 1, 2} { ... }`
+  - Range iteration: `for uint i in [0:10] { ... }` or `[start:step:stop]`
+- `switch (target) { case value: { body } default: { body } }` — switch
+- `break;` — break from loop
+- `continue;` — continue to next iteration
+- `return;` or `return expression;` — return from subroutine
+- Register references in conditions must preserve the original
+  classical-register names
+
+**Subroutines:**
+
+- `def name(params) { body }` or `def name(params) -> returnType { body }`
+- Parameters: classical types passed by value, qubits by reference
+- Array params: `readonly array[type, #dim=N] name` or `mutable array[...]`
+- `sizeof(array)` or `sizeof(array, dim)` — query array dimensions
+
+**Extern declarations:**
+
+- `extern name(params) -> returnType;`
+
+**Pragma:**
+
+- `pragma namespace.name additional_text`
+- Preserved during serialization; ignored if unrecognized during deserialization
+
+**Annotations:**
+
+- `@namespace.name` — attached to the immediately following statement
+- Multiple annotations may precede a single statement
+
+**Comments:**
+
+- Line comments: `// comment`
+- Block comments: `/* comment */`
+
+**Symbolic parameters** remain as names in the output.
 
 **`deserialize(source) -> QuantumCircuit`**
 
-Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
+Parses a **complete OpenQASM 3 program** and reconstructs a `QuantumCircuit`.
+Must handle all features listed above:
 
 - Header parsing (`OPENQASM 3.0;`, `include` directives)
-- Qubit declarations and multiple named classical-register declarations in
-  source order
+- Qubit declarations (virtual `qubit[N]` and physical `$n` references) and
+  multiple named classical-register declarations in source order
+- Classical type declarations: `bool`, `int[n]`, `uint[n]`, `float[n]`,
+  `angle[n]`, `complex[float[n]]`, `duration`, `stretch`
+- `const`, `input`, `output` variable modifiers
+- `array` declarations with dimensions
 - All gate instructions with parameters
+- Custom gate definitions (`gate name(params) qargs { body }`)
+- Gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`) including chains
+- Gate broadcasting (gate applied to register)
 - Measurement, reset, barrier, delay
 - Global phase (`gphase`)
-- Control flow blocks (`if`, `while`, `for`, `switch`)
+- Classical expressions: arithmetic, bitwise, comparison, logical operators
+- Assignment operators (`=`, `+=`, `-=`, `*=`, etc.)
+- Built-in constants (`pi`, `tau`, `euler`) and math functions (`sin`, `cos`,
+  `sqrt`, `exp`, `arccos`, `arcsin`, `arctan`, `ceiling`, `floor`, `log`, `mod`,
+  `popcount`, `rotl`, `rotr`, `tan`)
+- Explicit type casting
+- Indexing and slicing (element access, ranges, negative indices)
+- Integer literals (decimal, hex, octal, binary), bit string literals, timing
+  literals
+- Control flow blocks (`if`, `else`, `else if`, `while`, `for`, `switch`)
+- `break`, `continue`, `return` statements
 - Nested control flow
-- Comments (lines starting with `//`)
+- Subroutine definitions (`def`) and calls
+- Extern declarations (`extern`)
+- Pragma directives
+- Annotations (single and multiple per statement)
+- Line comments (`//`) and block comments (`/* */`)
 
-**Tests (minimum 25):**
+**Tests (minimum 45):**
 
 - Round-trip: `deserialize(serialize(circuit))` produces equivalent circuit.
 - Serialize a circuit with every gate type, verify output format.
@@ -2267,9 +2724,13 @@ Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
 - Verify delay format with units.
 - Verify global phase format: `gphase(theta);`.
 - Control flow: serialize/deserialize `if_test` with true and false body.
+- Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
-- Control flow: serialize/deserialize `for_loop`.
+- Control flow: serialize/deserialize `for_loop` with set `{0, 1, 2}` and range
+  `[0:10]` and stepped range `[0:2:10]`.
 - Control flow: serialize/deserialize `switch` with multiple cases and default.
+- Control flow: serialize/deserialize `break` and `continue` in loops.
+- Control flow: serialize/deserialize `return` in subroutines.
 - Nested control flow round-trip.
 - Symbolic parameters survive round-trip.
 - Multi-qubit gates serialize correctly (cx, ccx, swap, etc.).
@@ -2278,11 +2739,43 @@ Parses an OpenQASM 3 program and reconstructs a `QuantumCircuit`. Must handle:
 - Empty circuit serializes correctly.
 - Complex circuit with multiple named classical registers round-trip.
 - Deserialize preserves classical-register names and declaration order.
-- Parse comments in OpenQASM 3 source.
+- Parse line comments (`//`) and block comments (`/* */`).
+- **Gate modifiers:** serialize/deserialize `ctrl @ h q[0], q[1];`.
+- **Gate modifiers:** serialize/deserialize chained
+  `ctrl @ inv @ s q[0], q[1];`.
+- **Gate modifiers:** serialize/deserialize `negctrl @`, `pow(k) @`.
+- **Custom gate definition:** serialize/deserialize
+  `gate mygate(theta) q0, q1 { ... }`.
+- **Classical types:** serialize/deserialize `bool`, `int[32]`, `uint[8]`,
+  `float[64]`, `angle[16]` declarations.
+- **Const:** serialize/deserialize `const float[64] PI = 3.14159;`.
+- **Input/output:** serialize/deserialize `input angle[32] theta;` and
+  `output bit[2] result;`.
+- **Array:** serialize/deserialize `array[int[32], 4] counts;`.
+- **Classical expressions:** serialize/deserialize arithmetic (`a + b * c`),
+  bitwise (`a & b`, `a << 2`), comparison (`a == b`), logical (`a && b`).
+- **Assignment operators:** serialize/deserialize `counter += 1;`, `idx %= 4;`.
+- **Built-in constants:** serialize/deserialize `pi`, `tau`, `euler` in
+  expressions.
+- **Built-in math functions:** serialize/deserialize `sin(theta)`, `cos(theta)`,
+  `sqrt(2.0)`, `exp(x)`.
+- **Casting:** serialize/deserialize `int[32](float_var)`.
+- **Indexing/slicing:** serialize/deserialize `register[2:5]`, `array[i, j]`,
+  `register[-1]`.
+- **Physical qubits:** serialize/deserialize `cx $0, $1;`.
+- **Gate broadcasting:** serialize/deserialize `h q;` (H on entire register).
+- **Subroutine:** serialize/deserialize `def apply_h(qubit q0) { h q0; }` and
+  its call.
+- **Extern:** serialize/deserialize `extern parity(bit[n]) -> bit;`.
+- **Pragma:** serialize/deserialize `pragma ibm.noise_model depolarizing`.
+- **Annotations:** serialize/deserialize `@openqasm.scheduled` before a gate.
+- **Integer literals:** deserialize hex `0xFF`, octal `0o77`, binary `0b1010`.
+- **Bit string literals:** deserialize `"01010101"`.
+- **Timing literals:** deserialize `100ns`, `1.5us`, `200dt`.
 
 ---
 
-### Step 13: Public API Surface
+### Step 14: Public API Surface
 
 **File:** `src/mod.{ext}`
 
@@ -2313,16 +2806,23 @@ Complex, Matrix
 
 // Transpiler
 transpile, unrollComposites, synthesizeHighLevel,
+expandGateModifiers, inlineGateDefinitions, inlineSubroutines,
 layoutSABRE, routeSABRE, translateToBasis, optimize,
 decomposeZYZ, decomposeToRzSx, decomposeKAK
 
-// Types
+// Types — Core
 ClassicalRegister, ClassicalBitRef,
 Instruction, Condition, CircuitComplexity, BlochCoordinates,
 CorsProxyConfiguration,
 BackendConfiguration, IBMBackendConfiguration, QBraidBackendConfiguration,
 QubitProperties, GateProperties, Target,
 ExecutionResult, SerializedCircuit
+
+// Types — OpenQASM 3 Classical Type System
+ClassicalType, ClassicalVariable,
+GateDefinition, GateModifier,
+SubroutineDefinition, SubroutineParam, ExternDeclaration,
+ArrayType, Pragma, Annotation
 
 // Gate constructors (all of them)
 globalPhaseGate,
@@ -2343,11 +2843,11 @@ msGate, pauliGate
 ```
 
 Verify nothing is missing from this list by cross-referencing with the gates
-section.
+section and the OpenQASM 3 type system section.
 
 ---
 
-### Step 14: README Documentation
+### Step 15: README Documentation
 
 **File:** `README.md`
 
@@ -2376,11 +2876,16 @@ The README must contain the following sections in order:
    `mod.{ext}`, organized by category:
 
    - **QuantumCircuit** — Constructor, all gate methods (grouped: single-qubit,
-     two-qubit, three-qubit, four-qubit, multi-controlled, special),
-     measurement, reset, barrier, delay, control flow (`ifTest`, `forLoop`,
-     `whileLoop`, `switch`, `breakLoop`, `continueLoop`, `box`), composition
-     (`compose`, `toGate`, `toInstruction`, `append`, `inverse`), state
-     preparation (`prepareState`, `initialize`), introspection (`complexity`,
+     two-qubit, three-qubit, four-qubit, multi-controlled, special), gate
+     modifiers (`ctrl`, `negctrl`, `inv`, `pow`), custom gate definitions
+     (`defineGate`), measurement, reset, barrier, delay, control flow (`ifTest`,
+     `forLoop`, `whileLoop`, `switch`, `breakLoop`, `continueLoop`, `box`),
+     composition (`compose`, `toGate`, `toInstruction`, `append`, `inverse`),
+     state preparation (`prepareState`, `initialize`), classical variable
+     declarations (`declareClassicalVar`, `declareConst`, `declareInput`,
+     `declareOutput`, `declareArray`), classical assignment (`classicalAssign`),
+     subroutines (`defineSubroutine`, `declareExtern`, `callSubroutine`),
+     pragma/annotations (`pragma`, `annotate`), introspection (`complexity`,
      `blochSphere`), parameter binding (`run`), transpilation (`transpile`). For
      each method: signature, one-line description, parameter types.
 
@@ -2403,9 +2908,16 @@ The README must contain the following sections in order:
      configuration fields, transpilation and execution flow).
 
    - **Serialization** — `Serializer` interface, `OpenQASM3Serializer`
-     (`serialize`, `deserialize`).
+     (`serialize`, `deserialize`). Document the complete list of OpenQASM 3
+     features supported: classical types, const/input/output, arrays, gate
+     definitions, gate modifiers, classical expressions, built-in constants and
+     math functions, casting, indexing/slicing, physical qubits, gate
+     broadcasting, subroutines, externs, pragma, annotations, all control flow
+     including `else if`/`break`/`continue`/`return`, for-loop ranges,
+     integer/bit-string/timing literals, and block comments.
 
    - **Transpiler** — All public functions: `transpile`, `unrollComposites`,
+     `expandGateModifiers`, `inlineGateDefinitions`, `inlineSubroutines`,
      `synthesizeHighLevel`, `layoutSABRE`, `routeSABRE`, `translateToBasis`,
      `optimize`, `decomposeZYZ`, `decomposeToRzSx`, `decomposeKAK`.
 
@@ -2417,7 +2929,10 @@ The README must contain the following sections in order:
      `CircuitComplexity`, `BlochCoordinates`, `CorsProxyConfiguration`,
      `BackendConfiguration`, `IBMBackendConfiguration`,
      `QBraidBackendConfiguration`, `QubitProperties`, `GateProperties`,
-     `Target`, `ExecutionResult`, `SerializedCircuit`.
+     `Target`, `ExecutionResult`, `SerializedCircuit`, `ClassicalType`,
+     `ClassicalVariable`, `GateDefinition`, `GateModifier`,
+     `SubroutineDefinition`, `SubroutineParam`, `ExternDeclaration`,
+     `ArrayType`, `Pragma`, `Annotation`.
 
 5. **Usage Examples** — One short, self-contained code example for each of the
    following scenarios:
@@ -2438,6 +2953,10 @@ The README must contain the following sections in order:
    - **Custom unitary**: Apply a user-defined 2x2 unitary matrix.
    - **Complex and Matrix algebra**: Demonstrate `Complex` arithmetic and
      `Matrix` operations (multiply, tensor, dagger).
+   - **Gate modifiers**: Use `ctrl @`, `inv @`, and `pow(k) @` modifiers via the
+     circuit builder, serialize to OpenQASM 3, verify output.
+   - **Custom gate definition**: Define a reusable gate with `defineGate`, use
+     it in a circuit, serialize to OpenQASM 3.
 
 6. **Running Tests** — The exact command(s) to run the full test suite for the
    target language, including how to enable the skipped IBM and qBraid backend
@@ -2517,28 +3036,28 @@ distributions:
 
 ## 9. Test Plan — Complete Specification
 
-The test suite must contain **at minimum 550 tests** organized as follows:
+The test suite must contain **at minimum 617 tests** organized as follows:
 
 ### 9.1 Unit Tests per Module
 
 | Module         | Min Tests                |
 | -------------- | ------------------------ |
-| Types          | 10                       |
+| Types          | 15                       |
 | Complex        | 40                       |
 | Matrix         | 45                       |
 | Gates          | 80                       |
 | Parameter      | 15                       |
-| Circuit        | 40                       |
+| Circuit        | 55                       |
 | Backend        | 5                        |
 | Simulator      | 60                       |
-| Transpiler     | 40                       |
+| Transpiler     | 55                       |
 | IBM Backend    | 20 (partially skippable) |
 | qBraid Backend | 20 (partially skippable) |
 | Bloch          | 20                       |
-| Serializer     | 25                       |
-| **Total**      | **420**                  |
+| Serializer     | 45                       |
+| **Total**      | **475**                  |
 
-### 9.2 Integration Tests — Quantum Circuit Verification (minimum 130)
+### 9.2 Integration Tests — Quantum Circuit Verification (minimum 142)
 
 Build and simulate complete quantum circuits, run with 1024 or 4096 shots, and
 verify output distribution matches expectations.
@@ -2676,6 +3195,27 @@ verify output distribution matches expectations.
     circuit (2-3 qubits), transpile it for a mock backend with a constrained
     coupling map and basis gates, then simulate both the original and transpiled
     circuit and verify they produce equivalent distributions.
+99. **Gate modifier `ctrl @` end-to-end**: Build circuit with `ctrl @ rz(pi/4)`,
+    expand modifiers via transpiler, simulate -> verify controlled-phase
+    behavior.
+100. **Gate modifier `inv @` end-to-end**: Build circuit with `inv @ s`, expand
+     -> verify Sdg behavior via simulation.
+101. **Gate modifier `pow(2) @ t` end-to-end**: Expand -> verify S behavior.
+102. **Chained modifiers end-to-end**: `ctrl @ inv @ s` -> simulate -> verify
+     controlled-Sdg on all basis states.
+103. **Custom gate definition end-to-end**: Define `bell(q0, q1)`, use it,
+     serialize to OpenQASM 3, deserialize, simulate -> verify Bell state.
+104. **OpenQASM 3 classical types round-trip**: Serialize circuit with `bool`,
+     `int[32]`, `const`, `input`, `output` -> deserialize -> verify preserved.
+105. **OpenQASM 3 gate modifiers round-trip**: Serialize circuit with
+     `ctrl @ h`, `inv @ s`, `pow(2) @ t` -> deserialize -> verify modifiers
+     preserved.
+106. **OpenQASM 3 subroutine round-trip**: Serialize circuit with `def` and
+     subroutine call -> deserialize -> verify preserved.
+107. **OpenQASM 3 classical expressions round-trip**: Serialize circuit with
+     arithmetic and bitwise expressions -> deserialize -> verify preserved.
+108. **OpenQASM 3 pragma and annotation round-trip**: Serialize circuit with
+     pragma and annotations -> deserialize -> verify preserved.
 
 ### 9.3 Skippable Tests (IBM & qBraid Backends)
 
@@ -2690,7 +3230,7 @@ language:
 | TypeScript | Check for (`IBM_BEARER_TOKEN` or `IBM_API_KEY`) and `IBM_SERVICE_CRN`; skip with `Deno.test` ignore                                                 |
 | Python     | `@pytest.mark.skipif((not os.environ.get("IBM_BEARER_TOKEN") and not os.environ.get("IBM_API_KEY")) or not os.environ.get("IBM_SERVICE_CRN"), ...)` |
 | Rust       | `#[ignore]` attribute, run with `cargo test -- --ignored`                                                                                           |
-| Go         | `if ((os.Getenv("IBM_BEARER_TOKEN") == "" && os.Getenv("IBM_API_KEY") == "")                                                                        |
+| Go         | `if (os.Getenv("IBM_BEARER_TOKEN") == "" && os.Getenv("IBM_API_KEY") == "") \|\| os.Getenv("IBM_SERVICE_CRN") == "" { t.Skip(...) }`                |
 
 The skip gate only determines whether IBM credentials are present at all. Once
 enabled, the IBM execution tests must still assert that **exactly one** of
@@ -2736,7 +3276,7 @@ The test runner output must clearly indicate which tests were skipped and why.
 4. Only then proceed to the next module.
 
 After all modules are complete: 5. Run the full integration test suite. 6. All
-550+ tests must pass before the library is considered complete (excluding
+617+ tests must pass before the library is considered complete (excluding
 skipped IBM and qBraid execution tests).
 
 ---
@@ -2759,6 +3299,16 @@ Before declaring the library done, verify:
 - [ ] Global phase gate implemented and tested.
 - [ ] All circuit builder methods wired up (every gate, measure, reset, barrier,
       delay, control flow, composition, inverse, complexity, blochSphere, run).
+- [ ] Gate modifier methods (`ctrl`, `negctrl`, `inv`, `pow`) implemented and
+      tested on the circuit builder.
+- [ ] Custom gate definition (`defineGate`) and usage via `append` implemented.
+- [ ] Classical variable declarations (`declareClassicalVar`, `declareConst`,
+      `declareInput`, `declareOutput`, `declareArray`) implemented.
+- [ ] Classical assignment (`classicalAssign`) with compound operators
+      implemented.
+- [ ] Subroutine definitions (`defineSubroutine`), extern declarations
+      (`declareExtern`), and subroutine calls (`callSubroutine`) implemented.
+- [ ] Pragma and annotation methods implemented on circuit builder.
 - [ ] Ordered named classical-register metadata is preserved through circuit
       construction, composition, transpilation, serialization, simulation, and
       backend execution.
@@ -2773,6 +3323,38 @@ Before declaring the library done, verify:
 - [ ] OpenQASM 3 serialization handles all gates, measurements, resets,
       barriers, delays, global phase, control flow, and multiple named
       classical-register declarations in order.
+- [ ] OpenQASM 3 serialization/deserialization handles gate modifiers (`ctrl @`,
+      `negctrl @`, `inv @`, `pow(k) @`) including chained modifiers.
+- [ ] OpenQASM 3 serialization/deserialization handles custom `gate` definitions
+      with parameters and qubit arguments.
+- [ ] OpenQASM 3 serialization/deserialization handles classical typed
+      variables: `bool`, `int[n]`, `uint[n]`, `float[n]`, `angle[n]`,
+      `complex[float[n]]`, `duration`, `stretch`.
+- [ ] OpenQASM 3 serialization/deserialization handles `const`, `input`, and
+      `output` variable modifiers.
+- [ ] OpenQASM 3 serialization/deserialization handles `array` declarations.
+- [ ] OpenQASM 3 serialization/deserialization handles classical expressions:
+      arithmetic, bitwise, comparison, logical operators, assignment operators.
+- [ ] OpenQASM 3 serialization/deserialization handles built-in constants (`pi`,
+      `tau`, `euler`) and math functions (`sin`, `cos`, `sqrt`, `exp`, `arccos`,
+      `arcsin`, `arctan`, `ceiling`, `floor`, `log`, `mod`, `popcount`, `rotl`,
+      `rotr`, `tan`).
+- [ ] OpenQASM 3 serialization/deserialization handles casting, indexing,
+      slicing (including negative indices and range syntax).
+- [ ] OpenQASM 3 serialization/deserialization handles physical qubit references
+      (`$0`, `$1`).
+- [ ] OpenQASM 3 serialization/deserialization handles gate broadcasting.
+- [ ] OpenQASM 3 serialization/deserialization handles subroutine definitions
+      (`def`), extern declarations (`extern`), and subroutine calls.
+- [ ] OpenQASM 3 serialization/deserialization handles `else if` chains,
+      `break`, `continue`, `return` statements.
+- [ ] OpenQASM 3 serialization/deserialization handles for-loop range syntax
+      `[start:stop]` and `[start:step:stop]`.
+- [ ] OpenQASM 3 serialization/deserialization handles pragma directives and
+      annotations.
+- [ ] OpenQASM 3 serialization/deserialization handles integer literals (hex,
+      octal, binary), bit string literals, and timing literals.
+- [ ] OpenQASM 3 serialization/deserialization handles block comments (`/* */`).
 - [ ] OpenQASM 3 deserialization reconstructs circuits faithfully, including
       classical-register names and order.
 - [ ] Round-trip `deserialize(serialize(circuit))` produces equivalent circuits.
@@ -2787,8 +3369,17 @@ Before declaring the library done, verify:
 - [ ] `SimulatorBackend` implements `Backend` interface.
 - [ ] `IBMBackend` implements `Backend` interface.
 - [ ] `QBraidBackend` implements `Backend` interface.
-- [ ] Transpiler pipeline fully implemented: unroll, synthesis, layout (SABRE),
-      routing (SABRE), translation (ZYZ, RZ+SX, KAK), optimization.
+- [ ] Transpiler pipeline fully implemented: unroll (including gate modifier
+      expansion, custom gate inlining, subroutine inlining, const evaluation,
+      input resolution, pragma/annotation stripping, gate broadcasting),
+      synthesis, layout (SABRE), routing (SABRE), translation (ZYZ, RZ+SX, KAK),
+      optimization.
+- [ ] `expandGateModifiers` correctly expands `ctrl @`, `negctrl @`, `inv @`,
+      `pow(k) @` and chained modifiers into primitive gates.
+- [ ] `inlineGateDefinitions` inlines custom `gate` definitions with parameter
+      substitution.
+- [ ] `inlineSubroutines` inlines `def` subroutine calls with argument
+      substitution.
 - [ ] ZYZ decomposition correctly decomposes any single-qubit unitary.
 - [ ] RZ+SX decomposition correctly decomposes any single-qubit unitary.
 - [ ] KAK/Weyl decomposition correctly decomposes any two-qubit unitary.
@@ -2834,13 +3425,14 @@ Before declaring the library done, verify:
 - [ ] Matrix class has all methods, fully tested.
 - [ ] Gate matrices are all verified unitary.
 - [ ] No external math/LA dependencies.
-- [ ] 550+ tests passing (excluding skipped IBM and qBraid execution tests).
+- [ ] 617+ tests passing (excluding skipped IBM and qBraid execution tests).
 - [ ] All public API symbols exported from mod.{ext}.
 - [ ] `README.md` exists with: installation, quick start (Bell state example),
-      full public API reference for every exported symbol, 10 usage examples
+      full public API reference for every exported symbol, 12 usage examples
       (GHZ, parameterized circuit, state vector, Bloch sphere, OpenQASM 3
       round-trip, transpilation, composition, control flow, custom unitary,
-      Complex/Matrix algebra), test commands, and license.
+      Complex/Matrix algebra, gate modifiers, custom gate definition), test
+      commands, and license.
 
 ---
 
