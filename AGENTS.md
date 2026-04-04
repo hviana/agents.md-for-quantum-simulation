@@ -504,20 +504,64 @@ array of `Complex`. All methods return new instances.
 
 ---
 
-### Step 4: Gate Definitions
+### Step 4: Gate Definitions — Compositional Architecture
 
 **File:** `src/gates.{ext}`
 
 Every gate is a **pure function** returning a `Matrix`. Implement ALL of the
 following — no omissions.
 
-#### Zero-Qubit (Global) Gate
+#### Foundational Principle: Universality of Single-Qubit + CNOT
+
+Following Nielsen & Chuang §1.3.2 — **any multi-qubit unitary can be decomposed
+into single-qubit gates and CNOT (CX) gates.** These two ingredients form a
+universal gate set for quantum computation.
+
+This library embraces this principle architecturally: all multi-qubit gates are
+**defined as compositions** of single-qubit gates and CX. The gate functions
+compute their matrices by composing the constituent gate matrices via matrix
+multiplication and tensor products — not by hardcoding matrix entries.
+
+The gates are organized into **tiers of abstraction**, where each tier builds
+exclusively on gates from lower tiers:
+
+```
+Tier 0: Single-qubit primitives (matrix definitions)
+Tier 1: CX — the universal entangling primitive (matrix definition)
+Tier 2: Fundamental two-qubit compositions (from Tier 0 + Tier 1)
+Tier 3: Higher two-qubit compositions (from Tier 2)
+Tier 4: Three-qubit compositions (from Tier 2 + Tier 3)
+Tier 5: Four-qubit and multi-controlled compositions (from Tier 4)
+Tier 6: N-qubit composite gates (from lower tiers)
+```
+
+**Implementation:** Each multi-qubit gate function builds its result by
+composing lower-tier gate matrices. For example, `czGate()` internally calls
+`hadamard()` and `cxGate()`, constructs the appropriate tensor products, and
+multiplies them. No 4x4, 8x8, or 16x16 matrix is hardcoded.
+
+**Notation convention:** Decompositions are written in **circuit time order**
+(left to right), which matches the order operations are appended to a
+`QuantumCircuit` builder. The symbol `→` means "followed by." In standard matrix
+multiplication, the total unitary for a circuit `A → B → C` is `C · B · A` (the
+leftmost gate A is applied first, so it appears rightmost in the matrix
+product). Proofs in this document write matrix products in the standard
+mathematical convention (leftmost factor is applied last).
+
+---
+
+#### Tier 0: Single-Qubit Primitives (2×2 Matrices — defined from scratch)
+
+These are the atomic building blocks. Each is defined by its explicit 2×2
+matrix. Together with CX, they form the universal alphabet.
+
+**Zero-Qubit (Global) Gate:**
 
 | Function                 | Gate         | Matrix / Description                                   |
 | ------------------------ | ------------ | ------------------------------------------------------ |
-| `globalPhaseGate(theta)` | Global Phase | `[[exp(i*theta)]]` (1x1 matrix, multiplies full state) |
+| `globalPhaseGate(theta)` | Global Phase | `[[exp(i*theta)]]` (1×1 matrix, multiplies full state) |
 
-#### Single-Qubit Gates (return 2x2 Matrix)
+**Single-Qubit Gates (return 2×2 Matrix):**
 
 | Function             | Gate        | Matrix Definition                                                                    |
 | -------------------- | ----------- | ------------------------------------------------------------------------------------ |
@@ -551,290 +595,503 @@ return identity.
  [(-i*nx + ny)*sin(angle),          cos(angle) + i*nz*sin(angle)]]
 ```
 
-#### Two-Qubit Gates (return 4x4 Matrix)
+**Equivalences within Tier 0:**
 
-| Function                     | Gate          | Description                          |
-| ---------------------------- | ------------- | ------------------------------------ |
-| `chGate()`                   | CH            | Controlled-Hadamard                  |
-| `cxGate()`                   | CX / CNOT     | Controlled-X                         |
-| `cyGate()`                   | CY            | Controlled-Y                         |
-| `czGate()`                   | CZ            | Controlled-Z                         |
-| `dcxGate()`                  | DCX           | Double-CNOT: CX(0,1) then CX(1,0)    |
-| `ecrGate()`                  | ECR           | Echoed Cross-Resonance               |
-| `swapGate()`                 | SWAP          | Swap two qubits                      |
-| `iswapGate()`                | iSWAP         | iSWAP (swap with i phase)            |
-| `cpGate(lambda)`             | CP(l)         | Controlled-Phase                     |
-| `crxGate(theta)`             | CRX(th)       | Controlled-RX                        |
-| `cryGate(theta)`             | CRY(th)       | Controlled-RY                        |
-| `crzGate(theta)`             | CRZ(th)       | Controlled-RZ                        |
-| `csGate()`                   | CS            | Controlled-S                         |
-| `csdgGate()`                 | CSdg          | Controlled-Sdg                       |
-| `csxGate()`                  | CSX           | Controlled-SX                        |
-| `cuGate(th, ph, l, gamma)`   | CU(th,ph,l,g) | Controlled-U with global phase gamma |
-| `cu1Gate(lambda)`            | CU1(l)        | Controlled-U1 (= CP)                 |
-| `cu3Gate(th, ph, l)`         | CU3(th,ph,l)  | Controlled-U3                        |
-| `rxxGate(theta)`             | RXX(th)       | XX Ising interaction                 |
-| `ryyGate(theta)`             | RYY(th)       | YY Ising interaction                 |
-| `rzzGate(theta)`             | RZZ(th)       | ZZ Ising interaction                 |
-| `rzxGate(theta)`             | RZX(th)       | ZX interaction (cross-resonance)     |
-| `xxMinusYYGate(theta, beta)` | XX-YY(th,b)   | Parameterized (XX-YY) interaction    |
-| `xxPlusYYGate(theta, beta)`  | XX+YY(th,b)   | Parameterized (XX+YY) interaction    |
+- `T = P(pi/4)`, `S = P(pi/2)`, `Z = P(pi)`
+- `Sdg = S†`, `Tdg = T†`, `SXdg = SX†`
+- `SX * SX = X`, `SX * SXdg = I`
+- `U1(l) = P(l)`, `U3(th,ph,l) = U(th,ph,l)`
+- `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `Y = U(pi, pi/2, pi/2)`
 
-**All 4x4 matrices must match the exact definitions from the specification.**
+---
 
-Below are the explicit matrices for every two-qubit gate:
+#### Tier 1: The Universal Entangling Primitive — CX
 
-**CH:**
+The **only** multi-qubit gate defined by an explicit matrix. Together with the
+Tier 0 single-qubit gates, CX is sufficient to construct **any** unitary
+operation on any number of qubits (Nielsen & Chuang, Corollary 4.2).
+
+| Function   | Gate      | Matrix                                      |
+| ---------- | --------- | ------------------------------------------- |
+| `cxGate()` | CX / CNOT | `[[1,0,0,0],[0,1,0,0],[0,0,0,1],[0,0,1,0]]` |
+
+MSB-first ordering: bit 1 = control, bit 0 = target. Identity on |00⟩,|01⟩
+(control=0); X on target for |10⟩,|11⟩ (control=1).
+
+---
+
+#### General Controlled-U Construction (ABC Decomposition)
+
+Before defining Tier 2, we establish the **master recipe** from Nielsen & Chuang
+(Corollary 4.2) for building a controlled version of any single-qubit unitary.
+
+For any single-qubit U, write `U = exp(i*alpha) * A * X * B * X * C` where
+`A * B * C = I`. Then:
 
 ```
-[[1, 0, 0,         0        ],
- [0, 1, 0,         0        ],
- [0, 0, 1/sqrt(2), 1/sqrt(2)],
- [0, 0, 1/sqrt(2),-1/sqrt(2)]]
+Controlled-U(control, target) =
+    C(t) → CX(c,t) → B(t) → CX(c,t) → A(t) → P(alpha)(c)
 ```
 
-**CX:**
+**When control = 0:** CX does nothing, target sees `A * B * C = I`. ✓ **When
+control = 1:** CX applies X, target sees `A * X * B * X * C = U` (times phase
+from P(alpha) on control). ✓
+
+Note on notation: decompositions are written in **circuit time order** (left to
+right). In standard matrix multiplication, the leftmost gate is applied first,
+and the total unitary is the rightmost matrix times … times the leftmost. So
+`C → CX → B → CX → A` means C acts first, A acts last; when control = 0 the
+resulting matrix on the target is `A · B · C = I` (reading right-to-left in
+matrix product).
+
+**This uses exactly 2 CX gates + 4 single-qubit gates.**
+
+For the specific case of `U(theta, phi, lambda)`:
 
 ```
-[[1, 0, 0, 0],
- [0, 1, 0, 0],
- [0, 0, 0, 1],
- [0, 0, 1, 0]]
+A = Rz(phi) * Ry(theta/2)
+B = Ry(-theta/2) * Rz(-(phi+lambda)/2)
+C = Rz((lambda-phi)/2)
+alpha = (phi + lambda) / 2
 ```
 
-**CY:**
+Verify:
+`A * B * C = Rz(phi) * Ry(theta/2) * Ry(-theta/2) * Rz(-(phi+lambda)/2) * Rz((lambda-phi)/2) = Rz(phi) * I * Rz(-phi) = I`
+✓
+
+For `CU(theta, phi, lambda, gamma)` (with extra controlled global phase gamma):
 
 ```
-[[1, 0, 0,  0],
- [0, 1, 0,  0],
- [0, 0, 0, -i],
- [0, 0, i,  0]]
+CU(th,ph,l,gamma, c, t) =
+    Rz((l-ph)/2)(t) →                  // C on target
+    CX(c,t) →
+    Rz(-(ph+l)/2)(t) → Ry(-th/2)(t) → // B on target
+    CX(c,t) →
+    Ry(th/2)(t) → Rz(ph)(t) →          // A on target
+    P(gamma + (ph+l)/2)(c)             // phase on control
 ```
 
-**CZ:**
+This construction is used by every Tier 2 controlled gate below.
+
+---
+
+#### Tier 2: Fundamental Two-Qubit Compositions
+
+Every gate in this tier is built **directly** from Tier 0 single-qubit gates and
+the Tier 1 CX gate. Each function computes its matrix by composing the
+constituent matrices.
+
+**CZ — Controlled-Z (1 CX)**
 
 ```
-[[1, 0, 0,  0],
- [0, 1, 0,  0],
- [0, 0, 1,  0],
- [0, 0, 0, -1]]
+CZ(c, t) = H(t) → CX(c, t) → H(t)
 ```
 
-**DCX:**
+Proof: When control=1, target sees `H * X * H = Z`. ✓
+
+**CY — Controlled-Y (1 CX)**
 
 ```
-[[1, 0, 0, 0],
- [0, 0, 1, 0],
- [0, 0, 0, 1],
- [0, 1, 0, 0]]
+CY(c, t) = Sdg(t) → CX(c, t) → S(t)
 ```
 
-**ECR:**
+Proof: When control=1, target sees `S * X * Sdg = Y`. ✓ Verify:
+`S*X*Sdg = [[1,0],[0,i]]*[[0,1],[1,0]]*[[1,0],[0,-i]] = [[0,-i],[i,0]] = Y`. ✓
+
+**CP — Controlled-Phase (2 CX)**
 
 ```
-(1/sqrt(2)) *
-[[0,  0,  1,  i],
- [0,  0,  i,  1],
- [1, -i,  0,  0],
- [-i, 1,  0,  0]]
+CP(lambda, c, t) =
+    P(lambda/2)(t) → CX(c,t) → P(-lambda/2)(t) → CX(c,t) → P(lambda/2)(c)
 ```
 
-**SWAP:**
+Proof: When c=0: `P(-l/2)*P(l/2) = I` on target, no phase on control. ✓ When
+c=1,t=1: `P(l/2)*X*P(-l/2)*X*P(l/2)` on target times `P(l/2)` on control =
+`exp(i*l)` total phase on |11⟩. ✓
+
+**CRZ — Controlled-RZ (2 CX)**
 
 ```
-[[1, 0, 0, 0],
- [0, 0, 1, 0],
- [0, 1, 0, 0],
- [0, 0, 0, 1]]
+CRZ(theta, c, t) = RZ(theta/2)(t) → CX(c,t) → RZ(-theta/2)(t) → CX(c,t)
 ```
 
-**iSWAP:**
+Proof: When c=0: `RZ(-th/2)*RZ(th/2) = I`. ✓ When c=1:
+`X*RZ(-th/2)*X = RZ(th/2)`, so total = `RZ(th/2)*RZ(th/2) = RZ(th)`. ✓
+
+**CRY — Controlled-RY (2 CX)**
 
 ```
-[[1, 0, 0, 0],
- [0, 0, i, 0],
- [0, i, 0, 0],
- [0, 0, 0, 1]]
+CRY(theta, c, t) = RY(theta/2)(t) → CX(c,t) → RY(-theta/2)(t) → CX(c,t)
 ```
 
-**CP(l):**
+Proof: `X*RY(-th/2)*X = RY(th/2)`, so when c=1: `RY(th/2)*RY(th/2) = RY(th)`. ✓
+
+**CRX — Controlled-RX (abstraction on CRZ, 2 CX)**
 
 ```
-[[1, 0, 0, 0         ],
- [0, 1, 0, 0         ],
- [0, 0, 1, 0         ],
- [0, 0, 0, exp(i*l)]]
+CRX(theta, c, t) = H(t) → CRZ(theta, c, t) → H(t)
 ```
 
-**CRX(th):** Identity in |00>,|01> subspace; RX(th) in |10>,|11> subspace.
+Proof: `H*RZ(th)*H = RX(th)`, so controlled version transforms CRZ→CRX. ✓
+Expanding: `H(t) → RZ(th/2)(t) → CX(c,t) → RZ(-th/2)(t) → CX(c,t) → H(t)`.
+
+**CS — Controlled-S (abstraction on CP, 2 CX)**
 
 ```
-[[1, 0, 0,              0             ],
- [0, 1, 0,              0             ],
- [0, 0, cos(th/2),      -i*sin(th/2)  ],
- [0, 0, -i*sin(th/2),   cos(th/2)     ]]
+CS(c, t) = CP(pi/2, c, t)
 ```
 
-**CRY(th):** Identity in |00>,|01> subspace; RY(th) in |10>,|11> subspace.
+Since `S = P(pi/2)`, controlled-S is controlled-phase with `lambda = pi/2`.
+
+**CSdg — Controlled-Sdg (abstraction on CP, 2 CX)**
 
 ```
-[[1, 0, 0,           0          ],
- [0, 1, 0,           0          ],
- [0, 0, cos(th/2),   -sin(th/2) ],
- [0, 0, sin(th/2),    cos(th/2) ]]
+CSdg(c, t) = CP(-pi/2, c, t)
 ```
 
-**CRZ(th):** Identity in |00>,|01> subspace; RZ(th) in |10>,|11> subspace.
+**CU1 — Controlled-U1 (abstraction on CP, 2 CX)**
 
 ```
-[[1, 0, 0,              0            ],
- [0, 1, 0,              0            ],
- [0, 0, exp(-i*th/2),   0            ],
- [0, 0, 0,              exp(i*th/2)  ]]
+CU1(lambda, c, t) = CP(lambda, c, t)
 ```
 
-**CS:**
+Since `U1 = P`.
+
+**CSX — Controlled-SX (2 CX)**
+
+Since `SX = exp(i*pi/4) * RX(pi/2)`, the controlled version picks up the global
+phase as a relative phase on the control:
 
 ```
-[[1, 0, 0, 0],
- [0, 1, 0, 0],
- [0, 0, 1, 0],
- [0, 0, 0, i]]
+CSX(c, t) = P(pi/4)(c) → CRX(pi/2, c, t)
 ```
 
-**CSdg:**
+Expanding:
+`P(pi/4)(c) → H(t) → RZ(pi/4)(t) → CX(c,t) → RZ(-pi/4)(t) → CX(c,t) → H(t)`.
+
+**CH — Controlled-Hadamard (2 CX, from ABC decomposition)**
+
+Using the general controlled-U recipe with the ZYZ decomposition of H:
+`H = exp(i*pi/2) * Rz(0) * Ry(pi/2) * Rz(pi)`, so `alpha = pi/2`, `beta = 0`,
+`gamma_ry = pi/2`, `delta = pi`.
 
 ```
-[[1, 0, 0, 0 ],
- [0, 1, 0, 0 ],
- [0, 0, 1, 0 ],
- [0, 0, 0, -i]]
+A = Ry(pi/4)
+B = Ry(-pi/4) * Rz(-pi/2)
+C = Rz(pi/2)
+
+CH(c, t) =
+    Rz(pi/2)(t) →                      // C = S(t)
+    CX(c, t) →
+    Rz(-pi/2)(t) → Ry(-pi/4)(t) →     // B (Rz first, then Ry in time order)
+    CX(c, t) →
+    Ry(pi/4)(t) →                      // A
+    P(pi/2)(c)                          // phase
 ```
 
-**CSX:** Identity in |00>,|01> subspace; SX in |10>,|11> subspace.
+**CU — General Controlled-U (2 CX)**
 
 ```
-[[1, 0, 0,         0        ],
- [0, 1, 0,         0        ],
- [0, 0, (1+i)/2,   (1-i)/2  ],
- [0, 0, (1-i)/2,   (1+i)/2  ]]
+CU(theta, phi, lambda, gamma, c, t) =
+    Rz((lambda-phi)/2)(t) →
+    CX(c, t) →
+    Rz(-(phi+lambda)/2)(t) → Ry(-theta/2)(t) →
+    CX(c, t) →
+    Ry(theta/2)(t) → Rz(phi)(t) →
+    P(gamma + (phi+lambda)/2)(c)
 ```
 
-**CU(th, ph, l, gamma):**
+**CU3 — Controlled-U3 (abstraction on CU, 2 CX)**
 
 ```
-[[1, 0, 0, 0],
- [0, 1, 0, 0],
- [0, 0, exp(i*gamma)*cos(th/2), -exp(i*(gamma+l))*sin(th/2)],
- [0, 0, exp(i*(gamma+ph))*sin(th/2), exp(i*(gamma+ph+l))*cos(th/2)]]
+CU3(theta, phi, lambda, c, t) = CU(theta, phi, lambda, 0, c, t)
 ```
 
-Note: MSB-first ordering. Bit 1 = control, bit 0 = target. The identity acts on
-the |00>,|01> subspace (control=0), and the U matrix acts on the |10>,|11>
-subspace (control=1).
-
-**CU1(l):** Same as CP(l).
-
-**CU3(th, ph, l):** Identity in |00>,|01>; U3(th,ph,l) in |10>,|11>.
-
-**RXX(th):**
+**DCX — Double-CNOT (2 CX)**
 
 ```
-[[cos(th/2),  0,             0,             -i*sin(th/2)],
- [0,          cos(th/2),     -i*sin(th/2),  0           ],
- [0,          -i*sin(th/2),  cos(th/2),     0           ],
- [-i*sin(th/2), 0,           0,             cos(th/2)   ]]
+DCX(a, b) = CX(a, b) → CX(b, a)
 ```
 
-**RYY(th):**
+Directly composed from two CX gates with swapped roles.
+
+---
+
+#### Tier 3: Higher Two-Qubit Compositions
+
+Gates in this tier are built from Tier 2 abstractions (and transitively from
+Tier 0 + Tier 1). They compose controlled gates and other Tier 2/3 gates.
+
+**SWAP (3 CX)**
 
 ```
-[[cos(th/2),  0,             0,             i*sin(th/2)],
- [0,          cos(th/2),     -i*sin(th/2),  0          ],
- [0,          -i*sin(th/2),  cos(th/2),     0          ],
- [i*sin(th/2), 0,            0,             cos(th/2)  ]]
+SWAP(a, b) = CX(a, b) → CX(b, a) → CX(a, b)
 ```
 
-**RZZ(th):**
+The canonical 3-CNOT SWAP decomposition.
+
+**RZZ — ZZ Ising Interaction (2 CX)**
 
 ```
-[[exp(-i*th/2), 0,            0,            0            ],
- [0,            exp(i*th/2),  0,            0            ],
- [0,            0,            exp(i*th/2),  0            ],
- [0,            0,            0,            exp(-i*th/2) ]]
+RZZ(theta, a, b) = CX(a, b) → RZ(theta)(b) → CX(a, b)
 ```
 
-**RZX(th):**
+Proof: CX entangles the parity of both qubits into qubit b. RZ rotates based on
+that parity. CX unentangles. The net effect is `exp(-i*theta/2 * Z⊗Z)`. Verify
+on basis states:
+
+- |00⟩ → CX → |00⟩ → RZ(th)|0⟩ = e^(-ith/2)|00⟩ → CX → e^(-ith/2)|00⟩ ✓
+- |01⟩ → CX → |01⟩ → RZ(th)|1⟩ = e^(ith/2)|01⟩ → CX → e^(ith/2)|01⟩ ✓
+- |10⟩ → CX → |11⟩ → e^(ith/2)|11⟩ → CX → e^(ith/2)|10⟩ ✓
+- |11⟩ → CX → |10⟩ → e^(-ith/2)|10⟩ → CX → e^(-ith/2)|11⟩ ✓
+
+**RXX — XX Ising Interaction (abstraction on RZZ, 2 CX)**
 
 ```
-[[cos(th/2),     -i*sin(th/2), 0,            0            ],
- [-i*sin(th/2),  cos(th/2),    0,            0            ],
- [0,             0,            cos(th/2),    i*sin(th/2)  ],
- [0,             0,            i*sin(th/2),  cos(th/2)    ]]
+RXX(theta, a, b) = H(a) → H(b) → RZZ(theta, a, b) → H(a) → H(b)
 ```
 
-**XX-YY(th, beta):**
+Proof: `H*Z*H = X`, so `(H⊗H) * (Z⊗Z) * (H⊗H) = X⊗X`. Conjugating
+`exp(-i*th/2 * Z⊗Z)` by `H⊗H` gives `exp(-i*th/2 * X⊗X)`. ✓
+
+**RYY — YY Ising Interaction (abstraction on RZZ, 2 CX)**
 
 ```
-[[cos(th/2),                    0, 0, -i*sin(th/2)*exp(-i*beta)],
- [0,                            1, 0,  0                       ],
- [0,                            0, 1,  0                       ],
- [-i*sin(th/2)*exp(i*beta),     0, 0,  cos(th/2)              ]]
+RYY(theta, a, b) = RX(pi/2)(a) → RX(pi/2)(b) → RZZ(theta, a, b) → RX(-pi/2)(a) → RX(-pi/2)(b)
 ```
 
-**XX+YY(th, beta):**
+Proof: `RX(pi/2)*Z*RX(-pi/2) = -Y` (conjugation), so
+`(RX(pi/2)⊗RX(pi/2)) * (Z⊗Z) * (RX(-pi/2)⊗RX(-pi/2)) = (-Y)⊗(-Y) = Y⊗Y`. ✓
+
+**RZX — ZX Cross-Resonance Interaction (abstraction on RZZ, 2 CX)**
 
 ```
-[[1, 0,                            0,                            0],
- [0, cos(th/2),                    -i*sin(th/2)*exp(-i*beta),    0],
- [0, -i*sin(th/2)*exp(i*beta),     cos(th/2),                   0],
- [0, 0,                            0,                            1]]
+RZX(theta, a, b) = H(b) → RZZ(theta, a, b) → H(b)
 ```
 
-#### Three-Qubit Gates (return 8x8 Matrix)
+Proof: Conjugation by `I⊗H` transforms `Z⊗Z → Z⊗X`. ✓ Expanding:
+`H(b) → CX(a,b) → RZ(theta)(b) → CX(a,b) → H(b)`.
 
-| Function      | Gate  | Description                    |
-| ------------- | ----- | ------------------------------ |
-| `ccxGate()`   | CCX   | Toffoli: doubly-controlled NOT |
-| `cczGate()`   | CCZ   | Doubly-controlled Z            |
-| `cswapGate()` | CSWAP | Fredkin: controlled SWAP       |
-| `rccxGate()`  | RCCX  | Relative-phase CCX             |
+**ECR — Echoed Cross-Resonance (abstraction on RZX, 2 CX)**
 
-**CCX (8x8):** Identity except rows/cols 6,7 where X is applied:
-`entry [6][6] = 0, entry [6][7] = 1, entry [7][6] = 1, entry [7][7] = 0`.
+```
+ECR(a, b) = RZX(pi/2, a, b) → X(a)
+```
 
-**CCZ (8x8):** Identity except `entry [7][7] = -1`.
+This is the exact matrix identity: `ECR = (X⊗I) * RZX(pi/2)`. Expanding:
+`H(b) → CX(a,b) → RZ(pi/2)(b) → CX(a,b) → H(b) → X(a)`.
 
-**CSWAP (8x8):** Identity except it swaps entries [5] and [6] (MSB-first:
-bit2=control, bit1=target1, bit0=target2; when control=1, swap target1 and
-target2, i.e. indices 5=101 and 6=110): `row 5: [0,0,0,0,0,0,1,0]`,
-`row 6: [0,0,0,0,0,1,0,0]`.
+**iSWAP (abstraction on SWAP + CZ, 4 CX)**
 
-**RCCX (8x8):** Identity except (MSB-first: bit2=ctrl1, bit1=ctrl2,
-bit0=target): `entry [5][5] = -1`, `entry [6][6] = 0, entry [6][7] = -i`,
-`entry [7][7] = 0, entry [7][6] = i`.
+```
+iSWAP(a, b) = CZ(a, b) → SWAP(a, b) → S(a) → S(b)
+```
 
-#### Four-Qubit Gates (return 16x16 Matrix)
+Proof on basis states:
 
-| Function      | Gate    | Description                |
-| ------------- | ------- | -------------------------- |
-| `mcxGate()`   | MCX/C3X | Triple-controlled X        |
-| `c3sxGate()`  | C3SX    | Triple-controlled SX       |
-| `rcccxGate()` | RCCCX   | Relative-phase CCCX (RC3X) |
+- |01⟩ → CZ → |01⟩ → SWAP → |10⟩ → S⊗S → i|10⟩ ✓
+- |10⟩ → CZ → |10⟩ → SWAP → |01⟩ → S⊗S → i|01⟩ ✓
+- |00⟩ → CZ → |00⟩ → SWAP → |00⟩ → S⊗S → |00⟩ ✓
+- |11⟩ → CZ → -|11⟩ → SWAP → -|11⟩ → S⊗S → -i²|11⟩ = |11⟩ ✓
 
-**MCX (16x16):** Identity except rows/cols 14,15 where X is applied.
+**XX+YY — Parameterized (XX+YY) Interaction (abstraction on CRX, 4 CX)**
 
-**C3SX (16x16):** Identity except rows/cols 14,15 where SX is applied.
+Acts on the {|01⟩, |10⟩} subspace with a phase twist beta.
 
-**RCCCX (16x16):** Identity except (MSB-first: bit3=ctrl1, bit2=ctrl2,
-bit1=ctrl3, bit0=target): `entry [12][12] = i`, `entry [13][13] = -i`,
-`entry [14][14] = 0, entry [14][15] = 1`,
-`entry [15][15] = 0, entry [15][14] = -1`.
+```
+XX+YY(theta, beta, a, b) =
+    RZ(-beta)(b) → CX(a, b) → CRX(theta, b, a) → CX(a, b) → RZ(beta)(b)
+```
 
-#### Multi-Controlled Gates (variable number of controls)
+Proof: CX(a,b) maps {|01⟩,|10⟩} to {|01⟩,|11⟩}. In this subspace, b=1 for both
+states, so CRX(theta, b, a) applies RX(theta) to qubit a. The second CX unmaps
+back. RZ(±beta) applies the phase twist.
 
-These are **functions** (not fixed-size matrices) that construct the appropriate
-matrix at call time based on the number of control qubits:
+- |00⟩: CX→|00⟩, CRX(b=0)→|00⟩, CX→|00⟩ → identity ✓
+- |11⟩: CX→|10⟩, CRX(b=0)→|10⟩, CX→|11⟩ → identity ✓
+- |01⟩: CX→|01⟩, CRX(b=1) applies RX(th) to a, CX unmaps ✓
+- |10⟩: CX→|11⟩, CRX(b=1) applies RX(th) to a, CX unmaps ✓
+
+**XX-YY — Parameterized (XX-YY) Interaction (abstraction on CRX, 4 CX)**
+
+Acts on the {|00⟩, |11⟩} subspace with a phase twist beta.
+
+```
+XX-YY(theta, beta, a, b) =
+    RZ(beta)(b) → X(b) → CX(a, b) → CRX(theta, b, a) → CX(a, b) → X(b) → RZ(-beta)(b)
+```
+
+Proof: X(b) flips qubit b, mapping {|00⟩,|11⟩} to {|01⟩,|10⟩}. Then CX maps to
+{|01⟩,|11⟩} where b=1, enabling CRX. The sequence reverses the mappings.
+
+- |00⟩: X→|01⟩, CX→|01⟩, CRX(b=1): RX(th) on a, CX→result, X→result ✓
+- |11⟩: X→|10⟩, CX→|11⟩, CRX(b=1): RX(th) on a, CX→result, X→result ✓
+- |01⟩: X→|00⟩, CX→|00⟩, CRX(b=0): identity, CX→|00⟩, X→|01⟩ → identity ✓
+- |10⟩: X→|11⟩, CX→|10⟩, CRX(b=0): identity, CX→|11⟩, X→|10⟩ → identity ✓
+
+---
+
+#### Tier 4: Three-Qubit Compositions
+
+All three-qubit gates are composed from Tier 2 and Tier 3 gates.
+
+**CCX — Toffoli / Doubly-Controlled X**
+
+**V-decomposition** (Barenco et al., 1995): Since `V² = X` where `V = SX`, the
+doubly-controlled X decomposes as:
+
+```
+CCX(c1, c2, t) =
+    CSX(c1, t) →        // Λ(V) controlled by c1
+    CX(c1, c2) →
+    CSXdg(c2, t) →      // Λ(V†) controlled by c2
+    CX(c1, c2) →
+    CSX(c2, t)           // Λ(V) controlled by c2
+```
+
+Proof (trace through all control states):
+
+- c1=1,c2=1: target sees `SX * (X*SXdg*X) * SX = SX * SX * SX * SXdg...`
+  Actually: Step 1 (c1=1): SX on t. Step 2: flip c2→0. Step 3 (c2=0): skip. Step
+  4: flip c2→1. Step 5 (c2=1): SX on t. Total: `SX * SX = X`. ✓
+- c1=1,c2=0: Step 1 (c1=1): SX. Step 2: flip c2→1. Step 3 (c2=1): SXdg. Step 4:
+  flip c2→0. Step 5 (c2=0): skip. Total: `SXdg * SX = I`. ✓
+- c1=0,c2=1: Step 1 (c1=0): skip. Steps 2,4: skip (c1=0). Step 3 (c2=1): SXdg.
+  Step 5 (c2=1): SX. Total: `SX * SXdg = I`. ✓
+- c1=0,c2=0: All skip → I. ✓
+
+CX count: 3 × CSX/CSXdg (2 CX each) + 2 CX = 8 CX total.
+
+**Optimized T-gate decomposition (6 CX):** For implementations that need minimum
+CX count, the Toffoli can also be decomposed as:
+
+```
+CCX_opt(c1, c2, t) =
+    H(t) → CX(c2,t) → Tdg(t) → CX(c1,t) → T(t) → CX(c2,t) →
+    Tdg(t) → CX(c1,t) → T(c2) → T(t) → H(t) → CX(c1,c2) →
+    T(c1) → Tdg(c2) → CX(c1,c2)
+```
+
+Both decompositions produce the same 8×8 matrix. The V-decomposition is the
+**canonical** definition (cleaner abstraction); the T-gate version is provided
+as an optimization. The implementation may use either.
+
+**CCZ — Doubly-Controlled Z (abstraction on CCX)**
+
+```
+CCZ(c1, c2, t) = H(t) → CCX(c1, c2, t) → H(t)
+```
+
+Proof: `H * X * H = Z`, so controlled-controlled-X with H conjugation =
+controlled-controlled-Z. Only |111⟩ picks up −1 phase. ✓
+
+**CSWAP — Fredkin / Controlled-SWAP (abstraction on CCX + CX)**
+
+```
+CSWAP(c, t1, t2) = CX(t2, t1) → CCX(c, t1, t2) → CX(t2, t1)
+```
+
+Proof: The first CX computes `t1 ⊕ t2` into t1. The CCX flips t2 conditioned on
+both the control and the XOR result. The final CX restores t1.
+
+- c=1,t1=0,t2=1: CX→|1,1,1⟩, CCX flips t2→|1,1,0⟩, CX→|1,1,0⟩ ✓ (swapped)
+- c=1,t1=1,t2=0: CX→|1,1,0⟩, CCX→|1,1,1⟩, CX→|1,0,1⟩ ✓ (swapped)
+- c=0: CCX does nothing → no swap ✓
+
+**RCCX — Relative-Phase CCX (3 CX, directly from Tier 0 + Tier 1)**
+
+A more efficient approximation that equals CCX up to relative phases on states
+where the target is not flipped:
+
+```
+RCCX(c1, c2, t) =
+    H(t) → T(t) → CX(c2, t) → Tdg(t) → CX(c1, t) →
+    T(t) → CX(c2, t) → Tdg(t) → H(t)
+```
+
+Uses only 3 CX gates. The resulting 8×8 matrix differs from CCX by phases on
+some basis states where both controls are not |1⟩, but the controlled-NOT action
+(flipping target when both controls are |1⟩) is preserved.
+
+---
+
+#### Tier 5: Four-Qubit and Multi-Controlled Compositions
+
+**Recursive Barenco Decomposition (general principle):**
+
+For an n-controlled gate `Cⁿ(U)`, find `V` such that `V² = U`. Then:
+
+```
+Cⁿ(U)(c1,...,cn, t) =
+    C(V)(cn, t) →
+    Cⁿ⁻¹(X)(c1,...,cn-1, cn) →
+    C(V†)(cn, t) →
+    Cⁿ⁻¹(X)(c1,...,cn-1, cn) →
+    Cⁿ⁻¹(V)(c1,...,cn-1, t)
+```
+
+This reduces an n-controlled-U to two (n-1)-controlled-X plus controlled-V
+gates, applied recursively until reaching 1-controlled (CX) gates.
+
+**MCX / C3X — Triple-Controlled X (abstraction on CCX + CSX)**
+
+Apply the Barenco decomposition with V = SX (since SX² = X):
+
+```
+MCX(c1, c2, c3, t) =
+    CSX(c3, t) →
+    CCX(c1, c2, c3) →
+    CSXdg(c3, t) →
+    CCX(c1, c2, c3) →
+    CCX(c1, c2, t)     // This is Cⁿ⁻¹(V) = C²(SX)
+```
+
+Note: The last term `C²(SX)` (doubly-controlled SX) itself decomposes using the
+V-gate technique with `W² = SX`, requiring further recursion. For efficiency,
+`C²(SX)` may be implemented using the optimized decomposition:
+
+```
+C²(SX)(c1, c2, t) =
+    C(SX^{1/2})(c2, t) → CX(c1, c2) → C(SX^{1/2})†(c2, t) → CX(c1, c2) → C(SX^{1/2})(c1, t)
+```
+
+Or as an alternative, use the RCCX-based construction:
+
+```
+MCX(c1, c2, c3, t) =
+    RCCX(c1, c2, ancilla) → RCCX(ancilla, c3, t) →
+    RCCX(c1, c2, ancilla) → RCCX(ancilla, c3, t)
+```
+
+when an ancilla qubit is available (relative-phase variant, fewer CX gates).
+
+**C3SX — Triple-Controlled SX**
+
+Same recursive structure as MCX but with `V² = SX`:
+
+```
+C3SX(c1, c2, c3, t) =
+    C(V)(c3, t) → CCX(c1, c2, c3) → C(V†)(c3, t) → CCX(c1, c2, c3) → CCX_V(c1, c2, t)
+```
+
+Where `V = SX^{1/2}` (the fourth root of X).
+
+**RCCCX — Relative-Phase C3X (directly from CX + single-qubit)**
+
+A more efficient 4-qubit gate using relative phase relaxation:
+
+```
+RCCCX(c1, c2, c3, t) =
+    H(t) → T(t) → CX(c3, t) → Tdg(t) → H(t) →
+    CX(c1, t) → T(t) → CX(c2, t) → Tdg(t) →
+    CX(c1, t) → T(t) → CX(c2, t) → Tdg(t) → H(t) →
+    T(t) → CX(c3, t) → Tdg(t) → H(t)
+```
+
+Uses fewer CX gates than the exact C3X by allowing relative phases on states
+where not all controls are |1⟩.
+
+**Multi-Controlled Gates (variable number of controls):**
 
 | Function                        | Gate | Description        |
 | ------------------------------- | ---- | ------------------ |
@@ -844,43 +1101,219 @@ matrix at call time based on the number of control qubits:
 | `mcryGateN(theta, numControls)` | MCRY | N-controlled RY    |
 | `mcrzGateN(theta, numControls)` | MCRZ | N-controlled RZ    |
 
-For N controls, the matrix is `2^(N+1) x 2^(N+1)`: identity everywhere except
-the last two rows/columns where the base gate's 2x2 matrix is applied.
+All use the recursive Barenco decomposition:
 
-#### Molmer-Sorensen Gate
+For `Cⁿ(U)` with N controls:
+
+- N=1: Use the Tier 2 controlled gate (CX, CRX, CRY, CRZ, CP).
+- N=2: Use the Tier 4 decomposition (Toffoli-like).
+- N≥3: Apply the recursive scheme:
+  `Cⁿ(U) = C(V)(cn,t) · Cⁿ⁻¹(X)(c1..cn-1,cn) · C(V†)(cn,t) · Cⁿ⁻¹(X)(c1..cn-1,cn) · Cⁿ⁻¹(V)(c1..cn-1,t)`
+  where V²=U.
+
+For N controls, the resulting matrix is `2^(N+1) × 2^(N+1)`: identity everywhere
+except the last two rows/columns where the base gate's 2×2 matrix is applied.
+**The matrix is computed by composing the recursive decomposition**, not by
+directly constructing the large matrix.
+
+---
+
+#### Tier 6: N-Qubit Composite Gates
+
+**Mølmer-Sørensen Gate**
 
 | Function           | Gate | Description                      |
 | ------------------ | ---- | -------------------------------- |
-| `msGate(theta, m)` | MS   | Molmer-Sorensen gate on m qubits |
+| `msGate(theta, m)` | MS   | Mølmer-Sørensen gate on m qubits |
 
-`MS(theta) = exp(-i * (theta/2) * sum_{j<k} X_j X_k)` — produces a `2^m x 2^m`
-matrix. This creates pairwise XX interactions among all qubit pairs.
+`MS(theta) = exp(-i * (theta/2) * sum_{j<k} X_j X_k)` — produces a `2^m × 2^m`
+matrix.
 
-#### Pauli String Gate
+Since the pairwise `X_j ⊗ X_k` terms commute (they share eigenstates), the
+exponential factorizes into a product of pairwise RXX interactions:
+
+```
+MS(theta, m) = product over all pairs (j, k) with j < k of RXX(theta, j, k)
+```
+
+Each RXX is a Tier 3 gate (built from RZZ, which is built from CX + RZ). This is
+a direct application of **abstractions upon abstractions**: MS → RXX → RZZ →
+CX + single-qubit.
+
+**Pauli String Gate**
 
 | Function                 | Gate  | Description                      |
 | ------------------------ | ----- | -------------------------------- |
 | `pauliGate(pauliString)` | Pauli | Tensor product of Pauli matrices |
 
-Given a string like `"XYZ"`, computes `X tensor Y tensor Z`. The string is read
+Given a string like `"XYZ"`, computes `X ⊗ Y ⊗ Z`. The string is read
 **left-to-right**: the leftmost character acts on the first qubit in the list
 (MSB of the gate matrix index).
+
+This decomposes trivially into independent single-qubit operations — each
+character maps to a Tier 0 Pauli gate applied to its respective qubit. No
+entanglement (CX) is needed; the matrix is constructed via tensor products of
+single-qubit matrices.
+
+---
+
+#### Reference: Expected Matrices
+
+The compositional definitions above produce the following matrices. These are
+**derived results** (computed by composing the decompositions), not independent
+definitions. Tests verify that the composition yields these exact matrices.
+
+**CX:** `[[1,0,0,0],[0,1,0,0],[0,0,0,1],[0,0,1,0]]`
+
+**CZ:** `diag(1, 1, 1, -1)`
+
+**CY:** `[[1,0,0,0],[0,1,0,0],[0,0,0,-i],[0,0,i,0]]`
+
+**CP(l):** `diag(1, 1, 1, exp(i*l))`
+
+**CRX(th):** Identity in |00⟩,|01⟩; RX(th) in |10⟩,|11⟩ subspace.
+
+**CRY(th):** Identity in |00⟩,|01⟩; RY(th) in |10⟩,|11⟩ subspace.
+
+**CRZ(th):** Identity in |00⟩,|01⟩; RZ(th) in |10⟩,|11⟩ subspace.
+
+**CS:** `diag(1, 1, 1, i)`
+
+**CSdg:** `diag(1, 1, 1, -i)`
+
+**CSX:** Identity in |00⟩,|01⟩; SX in |10⟩,|11⟩ subspace.
+
+**CH:** Identity in |00⟩,|01⟩; H in |10⟩,|11⟩ subspace.
+
+**CU(th,ph,l,gamma):** Identity in |00⟩,|01⟩; `exp(i*gamma)*U(th,ph,l)` in
+|10⟩,|11⟩ subspace.
+
+**CU1(l):** Same as CP(l).
+
+**CU3(th,ph,l):** Identity in |00⟩,|01⟩; U3(th,ph,l) in |10⟩,|11⟩.
+
+**DCX:** `[[1,0,0,0],[0,0,1,0],[0,0,0,1],[0,1,0,0]]`
+
+**SWAP:** `[[1,0,0,0],[0,0,1,0],[0,1,0,0],[0,0,0,1]]`
+
+**iSWAP:** `[[1,0,0,0],[0,0,i,0],[0,i,0,0],[0,0,0,1]]`
+
+**ECR:** `(1/sqrt(2))*[[0,0,1,i],[0,0,i,1],[1,-i,0,0],[-i,1,0,0]]`
+
+**RZZ(th):** `diag(exp(-i*th/2), exp(i*th/2), exp(i*th/2), exp(-i*th/2))`
+
+**RXX(th):** `[[cos(th/2),0,0,-i*sin(th/2)],[0,cos(th/2),-i*sin(th/2),0],`
+`[0,-i*sin(th/2),cos(th/2),0],[-i*sin(th/2),0,0,cos(th/2)]]`
+
+**RYY(th):** `[[cos(th/2),0,0,i*sin(th/2)],[0,cos(th/2),-i*sin(th/2),0],`
+`[0,-i*sin(th/2),cos(th/2),0],[i*sin(th/2),0,0,cos(th/2)]]`
+
+**RZX(th):** `[[cos(th/2),-i*sin(th/2),0,0],[-i*sin(th/2),cos(th/2),0,0],`
+`[0,0,cos(th/2),i*sin(th/2)],[0,0,i*sin(th/2),cos(th/2)]]`
+
+**XX+YY(th,beta):** `[[1,0,0,0],[0,cos(th/2),-i*sin(th/2)*exp(-i*beta),0],`
+`[0,-i*sin(th/2)*exp(i*beta),cos(th/2),0],[0,0,0,1]]`
+
+**XX-YY(th,beta):** `[[cos(th/2),0,0,-i*sin(th/2)*exp(-i*beta)],`
+`[0,1,0,0],[0,0,1,0],` `[-i*sin(th/2)*exp(i*beta),0,0,cos(th/2)]]`
+
+**CCX (8×8):** Identity except `[6][7]=1, [7][6]=1, [6][6]=0, [7][7]=0`.
+
+**CCZ (8×8):** Identity except `[7][7]=-1`.
+
+**CSWAP (8×8):** Identity except rows 5,6 swapped.
+
+**RCCX (8×8):** Identity except `[5][5]=-1`, `[6][6]=0, [6][7]=-i`,
+`[7][7]=0, [7][6]=i`.
+
+**MCX (16×16):** Identity except rows/cols 14,15 where X is applied.
+
+**C3SX (16×16):** Identity except rows/cols 14,15 where SX is applied.
+
+**RCCCX (16×16):** Identity except `[12][12]=i`, `[13][13]=-i`,
+`[14][14]=0, [14][15]=1`, `[15][15]=0, [15][14]=-1`.
+
+---
+
+#### Abstraction Dependency Graph
+
+```
+Tier 6: MS ──────────→ RXX (pairwise)
+        Pauli ────────→ Tier 0 (tensor products)
+
+Tier 5: MCX/C3X ─────→ CCX + CSX (recursive Barenco)
+        C3SX ─────────→ CCX + C(V) (recursive)
+        RCCCX ────────→ CX + single-qubit (direct, 4 CX)
+        mcxGateN ─────→ recursive Barenco → Tier 4 → Tier 2 → CX
+        mcpGateN ─────→ recursive Barenco → CP → CX
+        mcrxGateN ────→ recursive Barenco → CRX → CRZ → CX
+        mcryGateN ────→ recursive Barenco → CRY → CX
+        mcrzGateN ────→ recursive Barenco → CRZ → CX
+
+Tier 4: CCX ──────────→ CSX + CX (V-decomposition)
+        CCZ ──────────→ CCX + H
+        CSWAP ────────→ CCX + CX
+        RCCX ─────────→ CX + T/Tdg/H (direct, 3 CX)
+
+Tier 3: SWAP ─────────→ CX × 3
+        RZZ ──────────→ CX + RZ
+        RXX ──────────→ RZZ + H (basis change)
+        RYY ──────────→ RZZ + RX (basis change)
+        RZX ──────────→ RZZ + H (partial basis change)
+        ECR ──────────→ RZX + X
+        iSWAP ────────→ SWAP + CZ + S
+        XX+YY ────────→ CX + CRX
+        XX-YY ────────→ CX + CRX + X
+
+Tier 2: CZ ───────────→ CX + H
+        CY ───────────→ CX + S + Sdg
+        CP ───────────→ CX × 2 + P
+        CRZ ──────────→ CX × 2 + RZ
+        CRY ──────────→ CX × 2 + RY
+        CRX ──────────→ CRZ + H (basis change)
+        CS ───────────→ CP(π/2)
+        CSdg ─────────→ CP(-π/2)
+        CSX ──────────→ CRX(π/2) + P
+        CH ───────────→ ABC decomposition (2 CX)
+        CU ───────────→ ABC decomposition (2 CX)
+        CU1 ──────────→ CP
+        CU3 ──────────→ CU(γ=0)
+        DCX ──────────→ CX × 2
+
+Tier 1: CX (primitive) ← the only hardcoded multi-qubit matrix
+
+Tier 0: I, H, X, Y, Z, P, R, RX, RY, RZ, S, Sdg, SX, SXdg, T, Tdg,
+        U, U1, U2, U3, RV, GlobalPhase ← hardcoded 2×2 / 1×1 matrices
+```
+
+---
 
 #### Verification Requirements for Gates
 
 Every gate matrix must satisfy:
 
-1. **Unitarity:** `G_dagger * G ~ I` (within epsilon).
+1. **Unitarity:** `G† * G ≈ I` (within epsilon).
 2. **Correct dimensions.**
-3. **Known eigenvalue/eigenvector relationships** where applicable.
-4. **Equivalences:** `T = P(pi/4)`, `S = P(pi/2)`, `Z = P(pi)`,
+3. **Compositional correctness:** The matrix produced by composing the
+   decomposition equals the expected reference matrix (within epsilon).
+4. **Known eigenvalue/eigenvector relationships** where applicable.
+5. **Tier 0 equivalences:** `T = P(pi/4)`, `S = P(pi/2)`, `Z = P(pi)`,
    `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `SX*SX = X`, `SX*SXdg = I`,
    `U1(l) = P(l)`, `U3(th,ph,l) = U(th,ph,l)`, `CU1(l) = CP(l)`.
+6. **Compositional equivalences:**
+   - `CZ = (I⊗H) · CX · (I⊗H)`
+   - `CY = (I⊗S) · CX · (I⊗Sdg)`
+   - `SWAP = CX(a,b) · CX(b,a) · CX(a,b)`
+   - `CCX = CSX · CX · CSXdg · CX · CSX` (V-decomposition)
+   - `CCZ = (I⊗I⊗H) · CCX · (I⊗I⊗H)`
+   - `RXX(th) = (H⊗H) · RZZ(th) · (H⊗H)`
 
 **Tests (minimum 80):**
 
 - Every gate function is called and verified unitary.
-- Every gate's matrix elements are checked against known values.
+- Every gate's matrix elements are checked against the reference matrices.
+- **Compositional verification:** For each multi-qubit gate, verify that the
+  matrix produced by composing the decomposition matches the reference matrix.
 - Phase gate hierarchy: `tGate() ~ pGate(pi/4)`, `sGate() ~ pGate(pi/2)`,
   `pauliZ() ~ pGate(pi)`.
 - `uGate(pi, 0, pi) ~ pauliX()`.
@@ -894,36 +1327,66 @@ Every gate matrix must satisfy:
 - `sdgGate() ~ sGate().dagger()`.
 - `tdgGate() ~ tGate().dagger()`.
 - `cu1Gate(l) ~ cpGate(l)` for several values.
+- **CZ composition:** `H(t) · CX · H(t)` produces CZ matrix.
+- **CY composition:** `S(t) · CX · Sdg(t)` produces CY matrix.
+- **CP composition:** verify 2-CX decomposition matches `diag(1,1,1,exp(il))`.
+- **CRZ composition:** verify decomposition matches reference for several theta.
+- **CRY composition:** verify decomposition matches reference for several theta.
+- **CRX composition:** verify `H · CRZ · H` matches CRX reference.
+- **CS as CP(pi/2):** verify equivalence.
+- **CSX composition:** verify `P(pi/4) · CRX(pi/2)` matches reference.
 - CX: `CX|00>=|00>`, `CX|01>=|01>`, `CX|10>=|11>`, `CX|11>=|10>`.
 - CY: verify on all 4 basis states.
 - CZ: verify on all 4 basis states.
-- CH: verify on all 4 basis states.
+- CH: verify ABC decomposition produces correct matrix and on all 4 basis
+  states.
 - DCX: verify on all 4 basis states.
-- ECR: verify unitarity and matrix elements.
-- SWAP: `SWAP|01>=|10>`, `SWAP|10>=|01>`.
-- iSWAP: verify `iSWAP|01>=i|10>`, `iSWAP|10>=i|01>`.
+- ECR: verify `RZX(pi/2) · X` produces ECR matrix. Verify unitarity.
+- **SWAP composition:** verify 3-CX decomposition: `SWAP|01>=|10>`,
+  `SWAP|10>=|01>`.
+- **iSWAP composition:** verify `CZ · SWAP · S⊗S` produces iSWAP matrix.
+  `iSWAP|01>=i|10>`, `iSWAP|10>=i|01>`.
+- **RZZ composition:** verify `CX · RZ(th) · CX` matches reference for several
+  theta.
+- **RXX composition:** verify `H⊗H · RZZ(th) · H⊗H` matches reference.
+- **RYY composition:** verify `RX(pi/2)⊗RX(pi/2) · RZZ · RX(-pi/2)⊗RX(-pi/2)`
+  matches.
+- **RZX composition:** verify `H(b) · RZZ · H(b)` matches reference.
 - CP(l): verify on all 4 basis states for several lambda values.
 - CRX, CRY, CRZ: verify on basis states and unitarity.
 - CS, CSdg, CSX: verify on basis states.
-- CU: verify on basis states for specific parameters.
-- Toffoli: `CCX|110>=|111>`, `CCX|111>=|110>`, all other basis states unchanged.
-- CCZ: only `CCZ|111>` picks up -1 phase.
-- CSWAP: verify `CSWAP|1,01>=|1,10>`, `CSWAP|1,10>=|1,01>`, control=0 no change.
-- RCCX: is unitary, correct dimensions (8x8), verify specific entries.
+- CU: verify ABC decomposition on basis states for specific parameters.
+- **CCX V-decomposition:** verify `CSX · CX · CSXdg · CX · CSX` produces Toffoli
+  matrix. `CCX|110>=|111>`, `CCX|111>=|110>`, all others unchanged.
+- **CCZ composition:** verify `H · CCX · H` produces CCZ matrix. Only `CCZ|111>`
+  picks up -1 phase.
+- **CSWAP composition:** verify `CX · CCX · CX` produces Fredkin matrix.
+  `CSWAP|1,01>=|1,10>`, `CSWAP|1,10>=|1,01>`, control=0 no change.
+- RCCX: is unitary, correct dimensions (8×8), verify specific entries. Verify
+  3-CX decomposition produces correct matrix.
 - RXX(0) ~ I4, RZZ(0) ~ I4, RYY(0) ~ I4, RZX(0) ~ I4.
 - RXX, RYY, RZZ, RZX: unitary for several values of theta.
-- XX-YY and XX+YY: unitary for several parameter values, verify matrix elements.
-- MCX/C3X: verify unitarity, correct dimensions (16x16), flip on |1110>.
+- **XX+YY composition:** verify `CX · CRX · CX` pattern produces correct matrix
+  for several theta, beta. Verify on basis states.
+- **XX-YY composition:** verify `X · CX · CRX · CX · X` pattern produces correct
+  matrix for several theta, beta. Verify on basis states.
+- MCX/C3X: verify unitarity, correct dimensions (16×16), flip on |1110>. Verify
+  recursive decomposition produces correct matrix.
 - C3SX: verify unitarity, dimensions, apply SX on |1110>.
-- RCCCX: verify unitarity, correct dimensions (16x16).
+- RCCCX: verify unitarity, correct dimensions (16×16).
 - Multi-controlled gates with variable controls: verify for 1, 2, 3 controls.
-- MS gate: verify unitarity for 2 and 3 qubits.
-- Pauli string: `"X"` = pauliX, `"XY"` = X tensor Y, verify dimensions and
-  elements.
+  Verify recursive Barenco decomposition produces correct matrices.
+- **MS composition:** verify `product of RXX` produces MS matrix for 2 and 3
+  qubits. Verify unitarity.
+- Pauli string: `"X"` = pauliX, `"XY"` = X ⊗ Y, verify dimensions and elements.
+  Verify tensor product construction.
 - RV gate: `rvGate(0,0,0) ~ I`, `rvGate(pi,0,0) ~ -i*X` (up to phase),
   unitarity.
 - Action of every single-qubit gate on |0> and |1> verified against expected
   output.
+- **Tier chain verification:** Pick at least 3 gates from each tier and trace
+  the full decomposition down to CX + single-qubit, verifying that the final
+  composed matrix matches at every intermediate tier.
 
 ---
 
