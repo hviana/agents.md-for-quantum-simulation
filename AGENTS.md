@@ -259,10 +259,14 @@ explicitly says "textual OpenQASM 3 `U`". The textual OpenQASM 3 built-in
 single-qubit gate of the same spelling uses a different global-phase convention.
 Elsewhere in this section and in later decomposition rules, arbitrary unitary
 matrices/operators are written as `M` or `W` to avoid overloading the gate name
-`U`. Relative to this library's internal gate:
+`U`. Relative to this library's internal gate, the textual OpenQASM 3 built-in
+gate is:
 
 ```
-U_OpenQASM3(θ, φ, λ) = exp(i*θ/2) * U(θ, φ, λ)
+U_OpenQASM3(θ, φ, λ)
+  = (1/2) * [[1 + exp(i*θ),              -i*exp(i*λ)*(1 - exp(i*θ))           ],
+             [i*exp(i*φ)*(1 - exp(i*θ)), exp(i*(φ+λ))*(1 + exp(i*θ))         ]]
+  = exp(i*θ/2) * U(θ, φ, λ)
 ```
 
 Therefore exact translation between the internal API and textual OpenQASM 3 must
@@ -884,8 +888,10 @@ following phase-sensitive cases:
   `-(φ+λ)/2` compensation; verify same-name textual `p` / `rx` / `ry` / `rz` and
   `cp` / `crx` / `cry` / `crz` are exact same-angle matches from Section 2.5
   with no extra phase bookkeeping, so parsing textual `rx(θ)` yields internal
-  `RX(θ)` and emitting internal `RX(θ)` yields textual `rx(θ)`, and likewise for
-  `P`, `Y`, `Z`, and their controlled forms.
+  `RX(θ)` and emitting internal `RX(θ)` yields textual `rx(θ)`; likewise,
+  parsing/emitting textual `p(λ)` / `cp(λ)` yields internal `P(λ)` / `CP(λ)`,
+  and textual `ry` / `rz` / `cry` / `crz` map exactly to internal `RY` / `RZ` /
+  `CRY` / `CRZ` with the same parameter.
 - **ZYZ structural branches and lift choice:** include `I`, `-I`, a generic
   diagonal `SU(2)` case `diag(exp(-i*ζ), exp(i*ζ))`, a generic anti-diagonal
   `SU(2)` case `[[0, -exp(-i*ζ)], [exp(i*ζ), 0]]`, at least one generic
