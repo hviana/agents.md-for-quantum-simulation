@@ -240,22 +240,29 @@ Here and throughout this section, `wrapToPi(x)` means normalization to
   Equivalently, choose the unique representative `α ∈ (-π/2, π/2]` compatible
   with `det(M) = exp(2iα)`.
 - Let `V = exp(-i*α) * M`, so `det(V) = 1`.
-- Compute `γ = clamp(2 * arccos(|V[0][0]|), 0, π)`, where the clamp is only to
-  absorb floating-point roundoff. Apply the `γ = 0` / `γ = π` special-case
-  branches below before using the generic phase-difference formulas.
-- If `0 < γ < π`, set `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
+- Detect the structural special cases before using the generic phase-difference
+  formulas. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`, set `γ = 0` and use the
+  diagonal branch below. If `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π`
+  and use the anti-diagonal branch below. Here `ε_ZYZ` is a dedicated
+  decomposition-branch tolerance used only for this structural classification;
+  it need not equal the library's default equality epsilon, and implementations
+  must not select these branches solely by comparing an `arccos`-derived `γ`
+  against the default equality epsilon.
+- Otherwise compute `γ = clamp(2 * arccos(|V[0][0]|), 0, π)`, where the clamp is
+  only to absorb floating-point roundoff, and then set
+  `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
   `δ = wrapToPi(arg(-V[0][1]) - arg(V[0][0]))`, so the generic branch returns
   `β, δ ∈ (-π, π]`.
-- If `γ = 0` within epsilon, `V` is diagonal. Exactness depends on the
-  individual diagonal-entry phase, not only on their ratio. Let
+- If the `γ = 0` structural branch above is taken, `V` is diagonal. Exactness
+  depends on the individual diagonal-entry phase, not only on their ratio. Let
   `ζ = arg(V[1][1]) ∈ (-π, π]`, and set `β = ζ`, `δ = ζ`, so
   `RZ(β) * RZ(δ) = RZ(2ζ)` exactly. In particular, `V = -I` yields `β = δ = π`,
   not `β = δ = 0`.
-- If `γ = π` within epsilon, `V` is anti-diagonal. Exactness depends on the
-  individual off-diagonal-entry phase, not only on the phase ratio. Let
-  `ζ = arg(V[1][0]) ∈ (-π, π]`, and set `β = ζ`, `δ = -ζ`. When `ζ = π`, the
-  canonical pair is `(β, δ) = (π, -π)`; this is why the closed interval
-  `[-π, π]` is required at the boundary.
+- If the `γ = π` structural branch above is taken, `V` is anti-diagonal.
+  Exactness depends on the individual off-diagonal-entry phase, not only on the
+  phase ratio. Let `ζ = arg(V[1][0]) ∈ (-π, π]`, and set `β = ζ`, `δ = -ζ`. When
+  `ζ = π`, the canonical pair is `(β, δ) = (π, -π)`; this is why the closed
+  interval `[-π, π]` is required at the boundary.
 
 These normalization rules apply to decomposition/transpilation outputs so they
 are deterministic. User-facing gate constructors may accept any real angles and
@@ -512,27 +519,26 @@ control condition:
 #### 10. Serialization Phase Preservation
 
 The OpenQASM 3 serializer must preserve both hoistable scope-global phase and
-statement-level `gphase` operations. A hoistable `globalPhase` is considered
-"nonzero" only when the implementation can prove that its scalar
-`exp(i * globalPhase)` is not exactly `1`. Exact constant folding and exact
-modulo-`2π` reduction of purely numeric literals are allowed; implementations
-are not required to prove that arbitrary symbolic expressions equal `2πk`, and
-if they cannot prove unity they must preserve and emit the stored expression.
-"Normalized" here means "emit at most one leading bare, unmodified, unannotated
-`gphase(θ);` per scope for the hoistable scalar, using the implementation's
-canonical stored `AngleExpr` form"; it does not require aggressive symbolic
-rewriting or inexact floating simplification. When a scope's hoistable
-`globalPhase` is nonzero, emit at most one normalized leading bare, unmodified,
-unannotated `gphase(θ);` for that scalar. For a braced scope, emit it
-immediately after that scope's opening brace. For the top-level program scope,
-emit it immediately after the `OPENQASM ...;` line and any required `include`
-directives, and before later declarations or executable statements, **only**
-when the expression is valid there. A normalized top-level hoisted phase may
-depend on literals, built-in constants, and names already in scope at that
-point, but not on declarations that first appear later in the same program unit.
-A declaration-dependent phase is therefore not foldable into the top-level
-scalar for normalized OpenQASM output and must remain as an explicit statement
-in valid source order.
+statement-level `gphase` operations. A hoistable `globalPhase` may be omitted
+only when the implementation can prove that its scalar `exp(i * globalPhase)` is
+exactly `1`. Exact constant folding and exact modulo-`2π` reduction of purely
+numeric literals are allowed; implementations are not required to prove that
+arbitrary symbolic expressions equal `2πk`, and if exact unity cannot be proved
+they must preserve and emit the stored expression. "Normalized" here means "emit
+at most one leading bare, unmodified, unannotated `gphase(θ);` per scope for the
+hoistable scalar, using the implementation's canonical stored `AngleExpr` form";
+it does not require aggressive symbolic rewriting or inexact floating
+simplification. When a scope's hoistable `globalPhase` is not provably unity,
+emit at most one normalized leading bare, unmodified, unannotated `gphase(θ);`
+for that scalar. For a braced scope, emit it immediately after that scope's
+opening brace. For the top-level program scope, emit it immediately after the
+`OPENQASM ...;` line and any required `include` directives, and before later
+declarations or executable statements, **only** when the expression is valid
+there. A normalized top-level hoisted phase may depend on literals, built-in
+constants, and names already in scope at that point, but not on declarations
+that first appear later in the same program unit. A declaration-dependent phase
+is therefore not foldable into the top-level scalar for normalized OpenQASM
+output and must remain as an explicit statement in valid source order.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
@@ -2848,19 +2854,27 @@ Given U = [[a, b], [c, d]], det(U) = a*d - b*c = exp(2i*alpha):
 alpha = wrapToPi(phase(det(U)) / 2)   // unique principal half-angle, so alpha ∈ (-pi/2, pi/2]
 V = exp(-i*alpha) * U   (so det(V) = 1)
 V = [[v00, v01], [v10, v11]]
-gamma = clamp(2 * arccos(|v00|), 0, pi)
-if gamma is not approximately 0 or pi:
-  beta  = wrapToPi(phase(v10) - phase(v00))
-  delta = wrapToPi(phase(-v01) - phase(v00))
-else if gamma ≈ 0:
+if max(|v01|, |v10|) <= zyzBranchEps:
+  gamma = 0
   zeta  = phase(v11)
   beta  = zeta
   delta = zeta
-else: // gamma ≈ pi
+else if max(|v00|, |v11|) <= zyzBranchEps:
+  gamma = pi
   zeta  = phase(v10)
   beta  = zeta
   delta = -zeta    // if zeta = pi, keep delta = -pi exactly for exact equality
+else:
+  gamma = clamp(2 * arccos(|v00|), 0, pi)
+  beta  = wrapToPi(phase(v10) - phase(v00))
+  delta = wrapToPi(phase(-v01) - phase(v00))
 ```
+
+Here `zyzBranchEps` is a dedicated structural branch-classification tolerance,
+not necessarily the library-wide equality epsilon. Implementations must not
+decide the diagonal / anti-diagonal branches solely from the `arccos`-derived
+`gamma`, because floating-point roundoff near `0` or `pi` can make that test
+numerically unstable.
 
 These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
 matches the canonical ranges from Section 2.5.
@@ -2983,9 +2997,10 @@ e) Iterate until no more reductions or max iterations reached.
   recompose -> verify equals original matrix (within epsilon).
 - **ZYZ canonicalization:** Verify returned `gamma ∈ [0, pi]`,
   `beta/delta ∈ [-pi, pi]`, `alpha = wrapToPi(phase(det(U)) / 2)` (therefore
-  `alpha ∈ (-pi/2, pi/2]`), and the `gamma ≈ 0` / `gamma ≈ pi` tie-break rules
-  are followed exactly, including exact boundary cases such as `-I` and
-  `-RY(pi)`.
+  `alpha ∈ (-pi/2, pi/2]`), and the diagonal / anti-diagonal tie-break rules are
+  chosen from matrix-entry magnitudes (or exact symbolic structure), not solely
+  from the `arccos`-derived `gamma`, including exact boundary cases such as `-I`
+  and `-RY(pi)` and floating-point diagonal / anti-diagonal inputs.
 - **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose
   using the returned `globalPhase` -> verify exact equality with the original
   matrix.
@@ -3804,9 +3819,10 @@ cx q[0], q[1];
 
 - First line: `OPENQASM 3.0;`
 - Second line: `include "stdgates.inc";`
-- If the top-level circuit has nonzero hoistable `globalPhase`, emit a
-  normalized leading bare `gphase(theta);` immediately after the last required
-  `include` directive and before any declarations or executable statements.
+- If the top-level circuit has hoistable `globalPhase` that is not provably
+  unity, emit a normalized leading bare `gphase(theta);` immediately after the
+  last required `include` directive and before any declarations or executable
+  statements.
 - Any remaining statement-level bare `gphase(...)` instructions are emitted in
   source order and are not moved ahead of declarations.
 - `qubit[N] q;` declares N qubits (virtual qubits)
@@ -3850,9 +3866,9 @@ cx q[0], q[1];
 - `gate name(params) qargs { body }` — serialize gate definitions before use
 - Parameters behave as angle types
 - Empty body = identity gate
-- If a gate body has nonzero hoistable `globalPhase`, serialize it as a
-  normalized leading bare `gphase(theta);` immediately after `{` inside the gate
-  body.
+- If a gate body has hoistable `globalPhase` that is not provably unity,
+  serialize it as a normalized leading bare `gphase(theta);` immediately after
+  `{` inside the gate body.
 - Any remaining statement-level bare `gphase(...)` inside the body stays in
   source order.
 
@@ -3933,8 +3949,9 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
 - `return;` or `return expression;` — return from subroutine
 - Register references in conditions must preserve the original
   classical-register names
-- If a control-flow body has nonzero hoistable `globalPhase`, serialize it as a
-  normalized leading bare `gphase(theta);` inside that body scope.
+- If a control-flow body has hoistable `globalPhase` that is not provably unity,
+  serialize it as a normalized leading bare `gphase(theta);` inside that body
+  scope.
 - Any non-foldable bare `gphase(...)` inside the body remains in source order.
 
 **Subroutines:**
@@ -3943,8 +3960,9 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
 - Parameters: classical types passed by value, qubits by reference
 - Array params: `readonly array[type, #dim=N] name` or `mutable array[...]`
 - `sizeof(array)` or `sizeof(array, dim)` — query array dimensions
-- If a subroutine body has nonzero hoistable `globalPhase`, serialize it as a
-  normalized leading bare `gphase(theta);` inside the subroutine body.
+- If a subroutine body has hoistable `globalPhase` that is not provably unity,
+  serialize it as a normalized leading bare `gphase(theta);` inside the
+  subroutine body.
 - Any non-foldable bare `gphase(...)` inside the subroutine body remains in
   source order.
 
@@ -4027,9 +4045,9 @@ Must handle all features listed above:
 - Verify barrier format.
 - Verify delay format with units.
 - Verify hoistable bare global phase format: `gphase(theta);`.
-- Verify a nonzero top-level hoistable `globalPhase` serializes immediately
-  after the include block as a normalized leading bare `gphase(theta);` only
-  when its expression is valid there.
+- Verify a top-level hoistable `globalPhase` that is not provably unity
+  serializes immediately after the include block as a normalized leading bare
+  `gphase(theta);` only when its expression is valid there.
 - Verify gate-definition and subroutine-body hoistable `globalPhase` round-trip
   through normalized bare `gphase(theta);` statements without phase loss.
 - Verify hoistable symbolic bare `gphase(theta + phi/2);` round-trips without
