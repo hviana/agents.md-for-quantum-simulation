@@ -258,29 +258,40 @@ Aliases: `U1(λ) = P(λ)`, `U3(θ,φ,λ) = U(θ,φ,λ)`, `U2(φ,λ) = U(π/2, φ
 
 #### 6. Global Phase Tracking
 
-The library tracks an exact hoistable phase expression `globalPhase` on each
-phase-bearing scope: `QuantumCircuit`, custom gate definitions, subroutine
-definitions, and nested control-flow bodies. Its effect is to multiply every
-quantum amplitude exiting that scope by `exp(i * globalPhase)`. For a purely
-unitary scope this is equivalent to multiplying the scope unitary by that scalar
-after the body acts. For scopes that also contain measurement or classical
-control flow, the same scalar still multiplies every branch amplitude uniformly
-and therefore does not change measurement probabilities, collapse statistics, or
-branch predicates. It is still required for `getStateVector` correctness and for
-exact matrix/state comparisons on unitary subscopes. `globalPhase` is stored
-exactly as an angle expression, not only as a floating-point number. However, it
-stores only phase that is hoistable to the entry of the owning scope without
-changing semantics. A phase is hoistable only if it is unmodified, unannotated,
-and its expression depends only on symbols that are already in scope at that
-scope's entry and remain immutable throughout that scope. If unresolved symbols
-remain, any operation that needs a concrete complex scalar must bind them first.
+The library tracks an exact canonical scope-global phase expression
+`globalPhase` on each phase-bearing scope: `QuantumCircuit`, custom gate
+definitions, subroutine definitions, and nested control-flow bodies. Its effect
+is to multiply every quantum amplitude exiting that scope by
+`exp(i * globalPhase)`. For a purely unitary scope this is equivalent to
+multiplying the scope unitary by that scalar after the body acts. For scopes
+that also contain measurement or classical control flow, the same scalar still
+multiplies every branch amplitude uniformly and therefore does not change
+measurement probabilities, collapse statistics, or branch predicates. It is
+still required for `getStateVector` correctness and for exact matrix/state
+comparisons on unitary subscopes. `globalPhase` is stored exactly as an angle
+expression, not only as a floating-point number. However, it stores only phase
+that is both **hoistable** to the entry of the owning scope without changing
+semantics and **foldable** into that scope's canonical leading phase
+representation. A bare phase statement is hoistable only if it is unmodified,
+unannotated, and its expression depends only on symbols that are already in
+scope at that scope's entry and remain immutable throughout that scope. A phase
+is foldable into `globalPhase` only if it is already in the canonical
+leading-phase position for the representation being built. In particular,
+builder-origin `globalPhaseGate(θ)` is foldable by construction. For parsed
+OpenQASM 3, foldable means belonging to the maximal leading run of bare,
+unmodified, unannotated, hoistable `gphase(...)` statements in that scope: at
+top level, immediately after the `OPENQASM` line and required `include`
+directives; in a braced scope, immediately after the opening `{`. Hoistable but
+non-foldable `gphase` statements remain ordinary zero-qubit instructions in
+source order. If unresolved symbols remain, any operation that needs a concrete
+complex scalar must bind them first.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
 expressions may be reduced modulo `2π` only when that reduction is exact.
 Implementations are **not** required to prove that an arbitrary symbolic
 expression equals `0` or `2πk`; if they cannot prove that the scalar is exactly
 unity, they must preserve and serialize the stored expression. In this document,
-"normalized" hoistable global phase means "at most one leading bare scope-level
+"normalized" scope-global phase means "at most one leading bare scope-level
 `gphase(...)` per scope, emitted in the implementation's canonical `AngleExpr`
 form"; it does **not** require aggressive symbolic rewriting or inexact
 floating-point simplification.
@@ -288,7 +299,7 @@ floating-point simplification.
 The `globalPhaseGate(θ)` operation increments the owning scope's global phase by
 `θ`, where `θ` may itself be symbolic. Its "matrix" is the 1×1 scalar
 `[[exp(i*θ)]]`. In the programmatic builder API, a bare unmodified
-`globalPhaseGate(θ)` denotes hoistable scope-global phase and is stored
+`globalPhaseGate(θ)` denotes foldable scope-global phase and is stored
 separately from the ordinary instruction stream rather than as a qubit
 instruction. When circuits/scopes are composed, their global phases add. When a
 circuit/scope is inverted, its global phase is negated. `compose`, `toGate`,
@@ -296,27 +307,30 @@ circuit/scope is inverted, its global phase is negated. `compose`, `toGate`,
 round-tripping must preserve this scalar exactly.
 
 A bare `gphase(θ);` parsed from OpenQASM 3 is folded into the owning scope's
-`globalPhase` only when it is hoistable by the rule above and no source-order
-information would be lost. Otherwise it remains an ordinary zero-qubit `gphase`
-instruction in the statement stream, preserving expression structure,
-annotations, and evaluation order. Modifier-bearing forms of
-`gphase`/`globalPhaseGate` are first normalized by modifier expansion:
-`inv @ gphase(θ)` becomes bare `gphase(-θ)` and `pow(k) @ gphase(θ)` becomes
-bare `gphase(k*θ)`. If the normalized result is then bare, unannotated, and
-hoistable, it may fold into the owning scope's scalar. Any remaining
-control-bearing, annotation-bearing, or otherwise non-hoistable forms are not
-scope-global: after control promotion they become relative-phase operators and
-must remain ordinary instructions (or equivalent desugared phase operators).
+`globalPhase` only when it is foldable by the rule above. For parsed OpenQASM,
+this means it is hoistable and already lies in the canonical leading-phase
+position for that scope; a leading run of such statements folds by addition.
+Otherwise it remains an ordinary zero-qubit `gphase` instruction in the
+statement stream, preserving expression structure, annotations, and evaluation
+order. Modifier-bearing forms of `gphase`/`globalPhaseGate` are first normalized
+by modifier expansion: `inv @ gphase(θ)` becomes bare `gphase(-θ)` and
+`pow(k) @ gphase(θ)` becomes bare `gphase(k*θ)`. If the normalized result is
+then bare, unannotated, and foldable, it may fold into the owning scope's
+scalar. Any remaining control-bearing, annotation-bearing, or otherwise
+non-foldable forms are not scope-global: after control promotion they become
+relative-phase operators and must remain ordinary instructions (or equivalent
+desugared phase operators).
 
 #### 7. Global-to-Relative Phase Promotion in Controlled Gates
 
 A gate's global phase is unobservable in isolation, but it becomes a **relative
-phase** when the gate is applied only on an enabled control subspace. If
-`U = exp(i*α) * V` (where `V` has `det(V) = 1` or some other normalized form),
-then the controlled version of `U` is **not** the same as the controlled version
-of `V`: when the control condition is satisfied, the target sees
-`U = exp(i*α) * V`, and the `exp(i*α)` factor applies only to that enabled
-subspace.
+phase** when the gate is applied only on an enabled control subspace. If a
+constructor or decomposition writes `U = exp(i*α) * V`, with `α` stored
+explicitly and `V` the remaining phase-stripped operator, then the controlled
+version of `U` is **not** the same as the controlled version of `V`: when the
+control condition is satisfied, the target sees `U = exp(i*α) * V`, and the
+`exp(i*α)` factor applies only to that enabled subspace. For single-qubit `U`,
+Section 2.5 provides the canonical way to choose such an `α`.
 
 For the **single positive-control** case, the standard controlled-U construction
 handles this by applying `P(α)` to the control qubit:
@@ -336,27 +350,27 @@ Concrete examples of this promotion:
 - The `CU(θ,φ,λ,γ)` gate includes an explicit `γ` parameter for an additional
   controlled global phase: `P(γ + (φ+λ)/2)` on the control.
 
-For **multiple positive controls**, the compensating phase must act only on the
-fully enabled control subspace. Implement it as the exact control-register phase
-operator that multiplies only `|11...1⟩` of the active positive-control wires by
-`exp(i*α)`; equivalently, use an exact multi-controlled phase synthesis on the
-controls themselves and then apply the controlled version of `V`. Applying
-`P(α)` to just one control wire is generally incorrect because it also phases
-partially enabled control states.
+For **multiple positive controls**, construct the compensating phase explicitly
+as a separate operator `E_α(controls)` on the active positive-control register,
+defined in that register's MSB-first basis by `diag(1, 1, ..., 1, exp(i*α))`.
+Then construct the gate as `E_α(controls) → Controlled-V(controls, targets)`.
+This is the normative logical construction even if `E_α` is later synthesized
+into basis gates. Applying `P(α)` to just one control wire is generally
+incorrect because it also phases partially enabled control states.
 
 For **negative controls**, conjugate each negative-control wire by `X` before
-and after both the enabled-subspace phase synthesis and the corresponding
-positive-control construction so that the promoted phase lands on the intended
-enabled subspace.
+and after both pieces of the construction so the enabled pattern becomes
+all-ones, apply the same `E_α` plus controlled-`V` construction in that
+normalized frame, then undo the `X` conjugations. In circuit-time order:
+`X(negctrls) → E_α(all active controls) → Controlled-V(normalized controls, targets) → X(negctrls)`.
 
 **Rule:** When constructing a controlled gate, preserve the base gate's global
 phase exactly on the enabled control subspace. For one positive control, this is
-`P(α)` on the control. For multiple positive controls, use the exact
-fully-enabled-control phase operator on the active control register. For mixed
-positive/negative controls, first conjugate negative controls by `X`, apply that
-same exact enabled-subspace phase construction plus the controlled `V`, then
-undo the `X` conjugations. Omitting this compensation produces the wrong
-controlled unitary by changing relative phases.
+`P(α)` on the control. For two or more positive controls, use `E_α` on the
+active control register. For mixed positive/negative controls, first conjugate
+negative controls by `X`, apply `E_α` plus the controlled `V` in the normalized
+all-ones frame, then undo the `X` conjugations. Omitting this compensation
+produces the wrong controlled unitary by changing relative phases.
 
 #### 8. Ising Interaction Gates
 
@@ -440,20 +454,22 @@ directives, and before declarations or executable statements.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
-statement is hoistable by Section 2.6. Otherwise preserve it as an ordinary
-zero-qubit instruction in source order, together with any attached annotations
-and exact expression structure. Modified or annotation-bearing forms such as
-`ctrl @ gphase(θ)`, `negctrl @ gphase(θ)`, or `@tag gphase(θ)` are not
-scope-global; they must be preserved as instructions (or equivalently desugared
-to exact enabled-subspace phase operators) and must not be folded into the scope
-scalar. `inv @ gphase(θ)` and `pow(k) @ gphase(θ)` are handled by modifier
-expansion first; only if the normalized result is still non-hoistable does it
-remain as an ordinary instruction. Round-tripping
+statement is foldable by Section 2.6. For parsed OpenQASM 3, that means the
+statement is hoistable and already belongs to the maximal leading run of bare,
+unmodified, unannotated `gphase(...)` statements in canonical leading position.
+Otherwise preserve it as an ordinary zero-qubit instruction in source order,
+together with any attached annotations and exact expression structure. Modified
+or annotation-bearing forms such as `ctrl @ gphase(θ)`, `negctrl @ gphase(θ)`,
+or `@tag gphase(θ)` are not scope-global; they must be preserved as instructions
+(or equivalently desugared to exact enabled-subspace phase operators) and must
+not be folded into the scope scalar. `inv @ gphase(θ)` and `pow(k) @ gphase(θ)`
+are handled by modifier expansion first; only if the normalized result is still
+non-foldable does it remain as an ordinary instruction. Round-tripping
 (`deserialize(serialize(circuit))`) must preserve exact phase-aware semantics.
 For purely unitary scopes, this means the same total unitary including global
 phase. For non-unitary scopes, it means the same declarations,
 executable-statement order, branch-local phase behavior, and evaluation order of
-any non-hoistable `gphase`.
+any non-foldable `gphase`.
 
 ---
 
@@ -753,27 +769,30 @@ Canonical phase representation:
 
 - `QuantumCircuit`, `GateDefinition`, and `SubroutineDefinition` each own a
   scalar `globalPhase` expression (`AngleExpr`) separate from their ordered
-  `Instruction[]`. This scalar stores only hoistable scope-global phase
-  metadata; not every surface-syntax `gphase` statement is representable solely
-  by this field.
+  `Instruction[]`. This scalar stores only scope-global phase that has already
+  been canonicalized into the leading scalar representation; not every
+  semantically hoistable surface-syntax `gphase` statement is representable
+  solely by this field.
 - `globalPhaseGate(theta)` adds to the owning scope's scalar; in the normalized
-  in-memory representation a hoistable **bare, unmodified** zero-qubit phase is
+  in-memory representation a foldable **bare, unmodified** zero-qubit phase is
   not stored as an ordinary instruction. If a lower-level representation or
   parser applies modifiers first, `inv @ gphase(theta)` and
   `pow(k) @
   gphase(theta)` may normalize to a bare phase and then follow the
-  same hoisting rule.
-- When parsing OpenQASM 3, fold only hoistable bare, unmodified, unannotated
+  same foldability rule from Section 2.6.
+- When parsing OpenQASM 3, fold only foldable bare, unmodified, unannotated
   `gphase(theta);` statements encountered in a given scope into that scope's
-  scalar by addition. A statement is hoistable only if its expression can be
-  moved to the scope entry without changing meaning: all referenced symbols are
-  already in scope there, remain immutable throughout the scope, and no
-  annotation or source-order information would be lost. Non-hoistable bare
-  `gphase` remains an ordinary zero-qubit instruction in source order.
-  Control-flow bodies are nested `QuantumCircuit` scopes, so branch-local phases
-  remain branch-local. Modifier-bearing forms such as `ctrl @ gphase(theta)`,
-  and annotated bare forms such as `@tag gphase(theta)`, are not scope-global
-  and must remain ordinary relative-phase instructions (or be desugared to
+  scalar by addition. A statement is hoistable if its expression can be moved to
+  the scope entry without changing meaning: all referenced symbols are already
+  in scope there and remain immutable throughout the scope. For parsed OpenQASM,
+  foldability is stricter: only the maximal leading run of bare, unmodified,
+  unannotated, hoistable `gphase(theta);` statements in canonical leading
+  position folds into the scalar; later hoistable bare `gphase` statements
+  remain ordinary zero-qubit instructions in source order. Control-flow bodies
+  are nested `QuantumCircuit` scopes, so branch-local phases remain
+  branch-local. Modifier-bearing forms such as `ctrl @ gphase(theta)`, and
+  annotated bare forms such as `@tag gphase(theta)`, are not scope-global and
+  must remain ordinary relative-phase instructions (or be desugared to
   equivalent controlled-phase operations).
 - When serializing, emit at most one normalized leading bare `gphase(theta);`
   per scope for the scalar `globalPhase`. Emit any remaining statement-level
@@ -782,8 +801,8 @@ Canonical phase representation:
   rest of the body statements. For the top-level program scope, emit the scalar
   immediately after the `OPENQASM` version line and any required `include`
   directives, and before declarations or executable statements; because the
-  scalar is hoistable by construction, it must not depend on names declared
-  later in that scope. "Normalized" here means one leading hoistable
+  scalar is stored only in canonical entry form, it must not depend on names
+  declared later in that scope. "Normalized" here means one leading canonical
   `gphase(theta);` per scope in the implementation's canonical stored
   `AngleExpr` form; it does not require proving symbolic `2πk = 0` identities
   beyond the exact simplifications the implementation already supports.
@@ -1109,8 +1128,8 @@ control = 1:** CX applies X, target sees
 exactly U. ✓
 
 Note on notation: decompositions are written in **circuit time order** (left to
-right). In standard matrix multiplication, the leftmost gate is applied first,
-and the total unitary is the rightmost matrix times … times the leftmost. So
+right). In standard matrix multiplication, the rightmost factor acts first, so a
+circuit-time sequence `G1 → G2 → G3` has total unitary `G3 * G2 * G1`. So
 `C → CX → B → CX → A` means C acts first, A acts last; when control = 0 the
 resulting matrix on the target is `A · B · C = I` (reading right-to-left in
 matrix product).
@@ -1968,11 +1987,12 @@ structure exactly until binding or evaluation.
 
 The same exact expression type is used for gate angles, scope `globalPhase`, and
 instruction-level `gphase(...)` expressions. Scope `globalPhase` stores only
-hoistable expressions as defined in Section 2.6; non-hoistable parsed
-`gphase(...)` keeps the same exact expression tree but remains an ordinary
-zero-qubit instruction. Serialization, binding, composition, and inversion must
-preserve these expressions symbolically; only operations that need a concrete
-complex scalar may require full binding first.
+expressions canonicalized into the scope scalar as defined in Section 2.6;
+parsed `gphase(...)` that are non-hoistable or merely non-foldable keep the same
+exact expression tree but remain ordinary zero-qubit instructions.
+Serialization, binding, composition, and inversion must preserve these
+expressions symbolically; only operations that need a concrete complex scalar
+may require full binding first.
 
 **Tests (minimum 15):**
 
@@ -2034,9 +2054,10 @@ parameters accept `AngleExpr`.
 
 A bare `qc.globalPhaseGate(theta)` normalizes directly into the circuit's
 `globalPhase` expression rather than being stored as an ordinary instruction.
-This builder API denotes hoistable scope-global phase. Deserialized OpenQASM
-bare `gphase(theta)` that is not hoistable under Section 2.6 must instead remain
-an ordinary zero-qubit instruction. A control-bearing form such as
+This builder API denotes canonical foldable scope-global phase. Deserialized
+OpenQASM bare `gphase(theta)` that is non-hoistable, or simply not foldable
+under Section 2.6 because it is not in canonical leading position, must instead
+remain an ordinary zero-qubit instruction. A control-bearing form such as
 `ctrl @ gphase(theta)` is not scope-global and must be represented as an
 instruction (or desugared to the exact enabled-subspace phase operator) rather
 than absorbed into `globalPhase`.
@@ -2291,16 +2312,18 @@ anonymous bit array during any circuit transformation.
   representation, and survives compose/inverse/serialization.
 - Verify symbolic `globalPhase` expressions survive bind/compose/inverse without
   numeric coercion.
-- Verify deserialized hoistable bare `gphase` statements normalize into the
-  scope `globalPhase` only when safe to hoist.
-- Verify deserialized declaration-dependent, mutable-state-dependent, or
-  annotated bare `gphase` statements remain ordinary zero-qubit instructions in
-  source order rather than being folded into the scope `globalPhase`.
+- Verify deserialized bare `gphase` statements normalize into the scope
+  `globalPhase` only when they are both hoistable and already in canonical
+  leading position.
+- Verify deserialized declaration-dependent, mutable-state-dependent,
+  late-position, or annotated bare `gphase` statements remain ordinary
+  zero-qubit instructions in source order rather than being folded into the
+  scope `globalPhase`.
 - Verify `inv @ gphase(...)` and `pow(k) @ gphase(...)` normalize first and are
   folded into the scope `globalPhase` only if the resulting bare phase is
-  hoistable.
+  foldable.
 - Verify control-bearing `gphase` operations, and any `gphase` still non-bare or
-  non-hoistable after modifier expansion, are stored as ordinary instructions or
+  non-foldable after modifier expansion, are stored as ordinary instructions or
   desugared relative-phase operations, not folded into the scope `globalPhase`.
 - Edge cases: circuit with 0 instructions, only measurements, only resets.
 - Qubit index validation for multi-qubit gates (no duplicate qubits).
@@ -2599,13 +2622,12 @@ also publicly exposed so users can invoke individual passes.
     `ctrl @ inv @ U` → first compute inv(U) = U†, then build controlled-U†.
   - A zero-qubit `gphase(expr)` may be folded into the owning scope's
     `globalPhase` only after all modifiers have been expanded and only if the
-    result is still a bare, unannotated, hoistable scope phase as defined in
+    result is still a bare, unannotated, foldable scope phase as defined in
     Section 2.6. `inv @ gphase(expr)` becomes `gphase(-expr)`,
     `pow(k) @ gphase(expr)` becomes `gphase(k*expr)`. If the resulting bare
-    phase is declaration-dependent, mutable-state-dependent, or otherwise
-    non-hoistable, keep it as a zero-qubit instruction.
-    `ctrl/negctrl @
-    gphase(expr)` synthesize exact enabled-subspace phase
+    phase is declaration-dependent, mutable-state-dependent, late-position, or
+    otherwise non-foldable, keep it as a zero-qubit instruction.
+    `ctrl/negctrl @ gphase(expr)` synthesize exact enabled-subspace phase
     operators that must **not** be folded into the scope scalar.
 - **Expand custom gate definitions** (`gate` bodies): inline the gate body with
   parameter substitution. Recursive gate definitions are expanded iteratively
@@ -3715,11 +3737,11 @@ cx q[0], q[1];
 - `inv @ gate qubits;` — inverse of gate
 - `pow(k) @ gate qubits;` — gate to the kth power
 - Modifiers can be chained: `ctrl @ inv @ gate qubits;`
-- Control-bearing or otherwise still-non-hoistable global phase stays a gate
+- Control-bearing or otherwise non-foldable global phase stays a gate
   instruction, e.g. `ctrl @ gphase(theta) q[0];`; it is **not** normalized into
   the leading scope `gphase(...)`. By contrast, `inv @ gphase(theta)` and
   `pow(k) @ gphase(theta)` are normalized by modifier expansion first and may
-  hoist only if the resulting bare phase is hoistable.
+  fold only if the resulting bare phase is foldable under Section 2.6.
 
 **Gate instructions:**
 
@@ -3743,7 +3765,7 @@ cx q[0], q[1];
 - Bare scope global phase: `gphase(0.7854);` For the hoistable scope-global
   scalar, the serializer emits at most one normalized leading bare `gphase(...)`
   statement per scope: after the include block for the top-level program, or
-  immediately after `{` for braced scopes. Non-hoistable bare `gphase(...)`
+  immediately after `{` for braced scopes. Non-foldable bare `gphase(...)`
   statements remain in source order instead.
 
 **Classical expressions and operators:**
@@ -3784,7 +3806,7 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
   classical-register names
 - If a control-flow body has nonzero hoistable `globalPhase`, serialize it as a
   normalized leading bare `gphase(theta);` inside that body scope.
-- Any non-hoistable bare `gphase(...)` inside the body remains in source order.
+- Any non-foldable bare `gphase(...)` inside the body remains in source order.
 
 **Subroutines:**
 
@@ -3794,7 +3816,7 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
 - `sizeof(array)` or `sizeof(array, dim)` — query array dimensions
 - If a subroutine body has nonzero hoistable `globalPhase`, serialize it as a
   normalized leading bare `gphase(theta);` inside the subroutine body.
-- Any non-hoistable bare `gphase(...)` inside the subroutine body remains in
+- Any non-foldable bare `gphase(...)` inside the subroutine body remains in
   source order.
 
 **Extern declarations:**
@@ -3836,11 +3858,11 @@ Must handle all features listed above:
 - Gate broadcasting (gate applied to register)
 - Measurement, reset, barrier, delay
 - Bare, unmodified global phase (`gphase`), folded into the current scope's
-  scalar `globalPhase`. After modifier expansion, `inv @ gphase` /
-  `pow(k) @
-  gphase` may also fold if the resulting bare phase is hoistable;
-  control- bearing or otherwise non-hoistable `gphase` stays an ordinary
-  instruction or equivalent relative-phase operator
+  scalar `globalPhase` only when it is foldable under Section 2.6. After
+  modifier expansion, `inv @ gphase` / `pow(k) @
+  gphase` may also fold if the
+  resulting bare phase is foldable; control- bearing or otherwise non-foldable
+  `gphase` stays an ordinary instruction or equivalent relative-phase operator
 - Classical expressions: arithmetic, bitwise, comparison, logical operators
 - Assignment operators (`=`, `+=`, `-=`, `*=`, etc.)
 - Built-in constants (`pi`, `tau`, `euler`) and math functions (`sin`, `cos`,
@@ -3882,6 +3904,8 @@ Must handle all features listed above:
 - Verify exact numeric `globalPhase` values may be reduced modulo `2*pi` when
   doing so preserves the scalar exactly, but symbolic hoistable phases are
   emitted in canonical stored form unless exact simplification proves unity.
+- Verify a semantically hoistable but non-leading bare `gphase(expr);` remains
+  in statement order and is not folded into the surrounding scope `globalPhase`.
 - Verify a declaration-dependent or otherwise non-hoistable bare `gphase(expr);`
   remains in statement order and is not folded into the surrounding scope
   `globalPhase`.
@@ -3889,7 +3913,7 @@ Must handle all features listed above:
   is not folded into the surrounding scope `globalPhase`.
 - Verify `inv @ gphase(theta);` and `pow(2) @ gphase(theta);` normalize first
   and serialize as hoisted bare `gphase(...)` only when the normalized result is
-  hoistable.
+  foldable.
 - Verify `ctrl @ gphase(theta) q[0];` round-trips as a modifier-bearing
   instruction and is not folded into the surrounding scope `globalPhase`.
 - Control flow: serialize/deserialize `if_test` with true and false body.
