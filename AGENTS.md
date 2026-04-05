@@ -256,8 +256,11 @@ emitted as textual OpenQASM 3 `U(θ, φ, λ)`, add compensating `gphase(-θ/2)` 
 the same scope, or use any phase-exact equivalent lowering. Conversely, if
 textual OpenQASM 3 `U(θ, φ, λ)` is parsed or canonicalized to the internal
 `U(θ, φ, λ)`, record the extracted phase `θ/2` explicitly in the same semantic
-scope. If the occurrence is controlled or otherwise non-hoistable, preserve that
-phase on the enabled subspace instead of hoisting it.
+scope. If the occurrence is controlled, preserve that phase on the enabled
+subspace instead of hoisting it. If it is unconditional but otherwise
+non-hoistable or non-foldable in its owning scope, preserve it as an ordinary
+`gphase` in valid evaluation order instead of promoting it to an
+enabled-subspace relative phase.
 
 The same distinction applies to the controlled form. In this library,
 `CU(θ, φ, λ, γ)` means identity on the control-0 subspace and
@@ -370,9 +373,11 @@ Therefore exact parsing of textual `u2` / `u3` into the library's internal `U2`
 / `U3` must record the extracted phase `-(φ+λ)/2` explicitly in the same
 semantic scope. Exact emission of internal `U2` / `U3` as those textual
 spellings must add compensating `gphase((φ+λ)/2)` in the same scope, or use any
-other phase-exact lowering. As with textual `U`, if the occurrence is controlled
-or otherwise non-hoistable, preserve that phase locally on the enabled subspace
-instead of hoisting it, and never silently collapse it into a neighboring
+other phase-exact lowering. As with textual `U`, if the occurrence is
+controlled, preserve that phase locally on the enabled subspace instead of
+hoisting it. If it is unconditional but otherwise non-hoistable or non-foldable
+in its owning scope, preserve it as an ordinary `gphase` in valid evaluation
+order instead. In all cases, never silently collapse it into a neighboring
 same-name library gate.
 
 #### 6. Global Phase Tracking
@@ -575,7 +580,8 @@ RZX(θ) = exp(-i * θ * Z⊗X / 2)
 These are obtained by basis-change conjugation of `RZZ`:
 
 - `RXX(θ) = (H⊗H) · RZZ(θ) · (H⊗H)` because `H·Z·H = X`
-- `RYY(θ) = (RX(π/2)⊗RX(π/2)) · RZZ(θ) · (RX(-π/2)⊗RX(-π/2))` because
+- `RYY(θ) = (RX(π/2)⊗RX(π/2)) · RZZ(θ) · (RX(-π/2)⊗RX(-π/2))`, so in
+  circuit-time order: `RX(-π/2)⊗RX(-π/2) → RZZ(θ) → RX(π/2)⊗RX(π/2)`, because
   `RX(π/2)·Z·RX(-π/2) = -Y` and `(-Y)⊗(-Y) = Y⊗Y`
 - `RZX(θ) = (I⊗H) · RZZ(θ) · (I⊗H)` because `H·Z·H = X` on the second qubit
 
@@ -2167,7 +2173,7 @@ convention above.
   theta.
 - **RXX composition:** verify `H⊗H · RZZ(th) · H⊗H` matches reference.
 - **RYY composition:** verify the documented circuit-time sequence
-  `RX(pi/2)⊗RX(pi/2) → RZZ → RX(-pi/2)⊗RX(-pi/2)` matches the reference.
+  `RX(-pi/2)⊗RX(-pi/2) → RZZ → RX(pi/2)⊗RX(pi/2)` matches the reference.
 - **RZX composition:** verify `H(b) · RZZ · H(b)` matches reference.
 - CP(l): verify on all 4 basis states for several lambda values.
 - CRX, CRY, CRZ: verify on basis states and unitarity.
