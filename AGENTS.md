@@ -295,6 +295,28 @@ emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those same-name textual
 spellings must emit the same angle. The standard-library controlled forms `crx`,
 `cry`, and `crz` inherit that same angle-preserving rule.
 
+Worked exact-translation examples:
+
+- Internal/API `U(π/2, 0, π)` equals `H` exactly under this document's phase
+  convention. Textual OpenQASM 3 `U(π/2, 0, π)` instead equals `exp(i*π/4) * H`.
+  Therefore exact emission of an unconditional internal `U(π/2, 0, π)` may use a
+  compensating leading `gphase(-π/4);` in the same scope followed by textual
+  `U(π/2, 0, π) q;`, or any other phase-exact lowering with the same net scalar.
+  Conversely, parsing that textual occurrence into the internal `U(π/2, 0, π)`
+  must extract the phase `π/4` explicitly in the same scope.
+- Textual `cu(π/2, 0, π, 0)` parses to internal `CU(π/2, 0, π, π/4)`, not to
+  internal `CU(π/2, 0, π, 0)`. Under any one-control lowering, that same
+  enabled-subspace phase appears locally as `P(π/4)` on the control together
+  with the chosen decomposition of the controlled internal `U(π/2, 0, π) = H`.
+- Textual `u2(0, π)` equals `exp(-i*π/2) * U2(0, π)` and therefore equals
+  `exp(-i*π/2) * H`. Exact emission of the internal alias `U2(0, π)` as textual
+  `u2(0, π)` therefore needs compensating `gphase(π/2)` in the same scope, or
+  another phase-exact lowering.
+- By contrast, the same-name textual rotations require no compensation: internal
+  `rz(θ)` emits as textual `rz(θ)` with the same angle and parses back with the
+  same angle; it must not be rewritten as `p(θ)` plus any implicit hidden phase
+  fixup.
+
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
 
@@ -483,6 +505,56 @@ circuits/scopes are composed, their global phases add. When a circuit/scope is
 inverted, its global phase is negated. `compose`, `toGate`, `toInstruction`,
 gate-definition bodies, subroutine bodies, and QASM round-tripping must preserve
 this scalar exactly.
+
+Normative examples:
+
+- Foldable top-level parsed phase:
+
+  ```qasm
+  OPENQASM 3.0;
+  include "stdgates.inc";
+  gphase(pi/7);
+  qubit q;
+  x q;
+  ```
+
+  Here `gphase(pi/7);` belongs to the maximal leading run immediately after the
+  required include directives, so it folds into the program scope's
+  `globalPhase`.
+- Valid but non-foldable top-level parsed phase:
+
+  ```qasm
+  OPENQASM 3.0;
+  include "stdgates.inc";
+  input angle[64] theta;
+  gphase(theta);
+  qubit q;
+  x q;
+  ```
+
+  Here `theta` is immutable and already in scope when the statement executes, so
+  the phase is hoistable within the top-level scope, but it is not foldable into
+  the canonical top-level scalar because it no longer lies in the maximal
+  leading run immediately after the include directives. It remains an ordinary
+  zero-qubit instruction in source order.
+- Non-hoistable branch-local phase:
+
+  ```qasm
+  if (flag) {
+    gphase(theta);
+    x q;
+  }
+  ```
+
+  Even if `theta` is immutable, this phase does not execute on every dynamic
+  path of the parent scope, so it is not hoistable out of the branch and must
+  remain inside the branch body.
+- Programmatic builder distinction: In the canonical builder API, bare
+  `globalPhaseGate(theta)` may fold into `globalPhase` when `theta` is valid at
+  scope entry under the same rule. To represent an explicit statement-level
+  phase that must not be silently canonicalized, use the low-level
+  append/raw-instruction route and append a zero-qubit `gphase` instruction
+  instead.
 
 A bare `gphase(θ);` parsed from OpenQASM 3 is folded into the owning scope's
 `globalPhase` only when it is foldable by the rule above. For parsed OpenQASM,
@@ -735,6 +807,51 @@ enabled-subspace phase compensation, instead of emitting those spellings
 directly. A deserializer may likewise canonicalize any of these into internal
 `P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit `globalPhase` or statement-level
 `gphase` so long as exact phase-aware semantics are preserved.
+
+#### 11. Minimum Phase-Aware Test Matrix
+
+Every implementation must include automated tests that cover at least the
+following phase-sensitive cases:
+
+- **Phase-sensitive equality vs physical equivalence:** `Matrix.equals` and
+  state-vector equality must reject operands that differ by a uniform global
+  phase; `equalsUpToGlobalPhase` must accept them. Include both all-zero
+  operands, exactly one all-zero operand, and a nonzero case using a single
+  shared pivot phase.
+- **`RZ` versus `P`:** verify `RZ(θ) = exp(-i*θ/2) * P(θ)` exactly, verify
+  `RZ(θ)` and `P(θ)` are not matrix-equal for generic `θ`, and verify `CRZ(θ)`
+  and `CP(θ)` are distinct on the enabled subspace.
+- **Named phase-bearing gates:** verify `SX = exp(i*π/4) * RX(π/2)` and
+  `SXdg = exp(-i*π/4) * RX(-π/2)` exactly; verify a substitution such as
+  `H = exp(i*π/2) * RY(π/2) * RZ(π)` carries its compensating phase explicitly.
+- **OpenQASM exact-spelling translations:** verify internal `U(π/2, 0, π)`
+  round-trips against textual `U(π/2, 0, π)` with compensating `gphase(-π/4)` on
+  emission and extracted `π/4` on parse; verify textual `cu(π/2, 0, π, 0)`
+  parses to internal `CU(π/2, 0, π, π/4)`; verify `u2` and `u3` apply the
+  `-(φ+λ)/2` compensation; verify same-name textual `rx` / `ry` / `rz` and `crx`
+  / `cry` / `crz` preserve the angle with no extra phase bookkeeping.
+- **ZYZ structural branches and lift choice:** include `I`, `-I`, a generic
+  diagonal `SU(2)` case `diag(exp(-i*ζ), exp(i*ζ))`, a generic anti-diagonal
+  `SU(2)` case `[[0, -exp(-i*ζ)], [exp(i*ζ), 0]]`, at least one generic
+  non-branch case, and at least one case whose correct decomposition requires
+  the second lift, for example `M = exp(i*3π/4) * RZ(0.3) * RY(1.0) * RZ(-0.4)`.
+- **Controlled global-phase promotion:** verify one-control promotion
+  (`CSX = P(π/4)` on the control plus `CRX(π/2)` on the target), two-or-more
+  control promotion via `E_α`, and mixed positive/negative controls via the
+  stated `X`-conjugation rule. Include controlled `gphase(θ)` as the `V = I`
+  special case.
+- **Scope-global vs statement-level phase:** verify a leading bare top-level
+  `gphase` folds into `globalPhase`, verify a hoistable but non-foldable
+  top-level `gphase` after declarations remains an instruction, and verify
+  branch-local or loop-local `gphase` is not hoisted out of its owning body.
+- **Round-trip semantics:** verify `deserialize(serialize(circuit))` preserves
+  total unitary including global phase for purely unitary scopes, and preserves
+  statement order plus branch-local phase behavior for scopes with measurement,
+  reset, or classical control.
+
+Numeric implementations should use the library comparison epsilon and `ε_ZYZ`
+for the respective assertions above. Exact symbolic front-ends should prefer
+exact comparison wherever the required predicates are decidable.
 
 ---
 
