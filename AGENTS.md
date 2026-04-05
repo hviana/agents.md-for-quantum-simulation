@@ -123,7 +123,14 @@ explicitly:
   corresponding pivot entry/amplitude that is nonzero in both operands, and
   require every entry/amplitude to match under that same phase within epsilon.
   Implementations must not compare only magnitudes or allow entry-wise varying
-  phases.
+  phases. For exact symbolic operands, the same semantic rule applies with
+  exact-zero and exact-entry matching instead of a floating comparison epsilon.
+  If an implementation cannot determine the required zero test, pivot, or common
+  phase exactly for unresolved symbolic values, it must either bind those values
+  before comparison or expose the operation as a numeric-only API. Public APIs
+  must document which behavior they use and must not silently degrade to a
+  weaker comparison such as magnitude-only matching, sampling-based checks, or
+  independent per-entry phase cancellation.
 
 #### 2. Rotation Gates — Negative-Exponent Physics Convention
 
@@ -244,7 +251,9 @@ Important naming distinction: within this specification, bare `U(θ, φ, λ)`
 refers to the library's **internal/API gate** defined above unless the text
 explicitly says "textual OpenQASM 3 `U`". The textual OpenQASM 3 built-in
 single-qubit gate of the same spelling uses a different global-phase convention.
-Relative to this library's internal gate:
+Elsewhere in this section and in later decomposition rules, arbitrary unitary
+matrices/operators are written as `M` or `W` to avoid overloading the gate name
+`U`. Relative to this library's internal gate:
 
 ```
 U_OpenQASM3(θ, φ, λ) = exp(i*θ/2) * U(θ, φ, λ)
@@ -507,22 +516,22 @@ operators).
 
 A gate's global phase is unobservable in isolation, but it becomes a **relative
 phase** when the gate is applied only on an enabled control subspace. If a
-constructor or decomposition writes `U = exp(i*α) * V`, with `α` stored
+constructor or decomposition writes `W = exp(i*α) * V`, with `α` stored
 explicitly and `V` the remaining phase-stripped operator, then the controlled
-version of `U` is **not** the same as the controlled version of `V`: when the
-control condition is satisfied, the target sees `U = exp(i*α) * V`, and the
-`exp(i*α)` factor applies only to that enabled subspace. For single-qubit `U`,
+version of `W` is **not** the same as the controlled version of `V`: when the
+control condition is satisfied, the target sees `W = exp(i*α) * V`, and the
+`exp(i*α)` factor applies only to that enabled subspace. For single-qubit `W`,
 Section 2.5 provides the canonical phase-bearing forms needed to choose such a
 factor exactly.
 
-For the **single positive-control** case, the standard controlled-U construction
-handles this by applying `P(α)` to the control qubit:
+For the **single positive-control** case, the standard controlled-single-qubit
+construction handles this by applying `P(α)` to the control qubit:
 
 ```
-Controlled-U(c, t) = C(t) → CX(c,t) → B(t) → CX(c,t) → A(t) → P(α)(c)
+Controlled-W(c, t) = C(t) → CX(c,t) → B(t) → CX(c,t) → A(t) → P(α)(c)
 ```
 
-where `U = exp(i*α) * A * X * B * X * C` and `A * B * C = I`.
+where `W = exp(i*α) * A * X * B * X * C` and `A * B * C = I`.
 
 Concrete examples of this promotion:
 
@@ -545,11 +554,23 @@ construction even if `E_α` is later synthesized into basis gates. Applying
 `P(α)` to just one control wire is generally incorrect because it also phases
 partially enabled control states.
 
+For example, with two positive controls `(c0, c1)` in that argument order,
+`E_α(c0, c1)` means `diag(1, 1, 1, exp(i*α))` in the MSB-first basis
+`|00⟩, |01⟩, |10⟩, |11⟩`, so only the fully enabled state `|11⟩` receives the
+phase. Applying `P(α)` only to `c0` would incorrectly phase both `|10⟩` and
+`|11⟩`; applying it only to `c1` would incorrectly phase both `|01⟩` and `|11⟩`.
+
 For **negative controls**, conjugate each negative-control wire by `X` before
 and after both pieces of the construction so the enabled pattern becomes
 all-ones, apply the same `E_α` plus controlled-`V` construction in that
 normalized frame, then undo the `X` conjugations. In circuit-time order:
 `X(negctrls) → E_α(all active controls) → Controlled-V(normalized controls, targets) → X(negctrls)`.
+
+For example, with control pattern `(negctrl c0, ctrl c1)` in that argument
+order, the exact promoted-phase construction is
+`X(c0) → E_α(c0, c1) → Controlled-V(c0, c1, targets) → X(c0)`, so only the
+original control pattern `c0 = 0, c1 = 1` receives the promoted phase and the
+action of `V`.
 
 A controlled `gphase(θ)` is the special case `V = I`, `α = θ`. Therefore, after
 negative-control normalization, a single active control gives exactly `P(θ)` on
@@ -1374,19 +1395,20 @@ MSB-first ordering: bit 1 = control, bit 0 = target. Identity on |00⟩,|01⟩
 Before defining Tier 2, we establish the **master recipe** from Nielsen & Chuang
 (Corollary 4.2) for building a controlled version of any single-qubit unitary.
 
-For any single-qubit U, write `U = exp(i*alpha) * A * X * B * X * C` where
-`A * B * C = I`. Then:
+To avoid confusion with the library's named gate `U(theta, phi, lambda)`, let an
+arbitrary single-qubit operator be written here as `W`. Write
+`W = exp(i*alpha) * A * X * B * X * C` where `A * B * C = I`. Then:
 
 ```
-Controlled-U(control, target) =
+Controlled-W(control, target) =
     C(t) → CX(c,t) → B(t) → CX(c,t) → A(t) → P(alpha)(c)
 ```
 
 **When control = 0:** CX does nothing, target sees `A * B * C = I`. ✓ **When
 control = 1:** CX applies X, target sees
-`A * X * B * X * C = exp(-i*alpha) * U`, and `P(alpha)` on control contributes
+`A * X * B * X * C = exp(-i*alpha) * W`, and `P(alpha)` on control contributes
 `exp(i*alpha)` when c=1, so the total action on the controlled subspace is
-exactly U. ✓
+exactly `W`. ✓
 
 Note on notation: decompositions are written in **circuit time order** (left to
 right). In standard matrix multiplication, the rightmost factor acts first, so a
@@ -1397,7 +1419,7 @@ matrix product).
 
 **This uses exactly 2 CX gates + 4 single-qubit gates.**
 
-For the specific case of `U(theta, phi, lambda)`:
+For the specific case of the library gate `U(theta, phi, lambda)`:
 
 ```
 A = Rz(phi) * Ry(theta/2)
@@ -2918,7 +2940,7 @@ also publicly exposed so users can invoke individual passes.
   - `ctrl(n) @ U` → build the (n+m)-qubit controlled-U gate matrix: identity on
     all states where any control qubit is |0>, apply U when all control qubits
     are |1>, and preserve any global phase of U as a relative phase only on that
-    fully enabled control subspace. If `U = exp(i*α) * V`, synthesize the exact
+    fully enabled control subspace. If `W = exp(i*α) * V`, synthesize the exact
     enabled-subspace phase operator on the active control pattern together with
     the controlled version of `V`; for all-positive controls this is the exact
     fully-enabled-control phase on the control register itself.
