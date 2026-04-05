@@ -286,14 +286,20 @@ internal `CU` as textual OpenQASM 3 `cu` subtracts `θ/2` from the stored fourth
 parameter or uses another phase-exact lowering.
 
 The same exact-spelling distinction applies to the standard-library textual
-rotation gates. Textual OpenQASM 3 `rx(θ)`, `ry(θ)`, and `rz(θ)` denote
-`exp(-i*θ*X/2)`, `exp(-i*θ*Y/2)`, and `exp(-i*θ*Z/2)` respectively, matching
-this library's internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` exactly under the
-negative-exponent half-angle convention from Section 2.2. Therefore exact
-parsing or canonicalization must preserve the same angle parameter, and exact
-emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those same-name textual
-spellings must emit the same angle. The standard-library controlled forms `crx`,
-`cry`, and `crz` inherit that same angle-preserving rule.
+rotation gates. In this specification, the textual spellings are fixed by their
+exact matrices and therefore match the library's internal half-angle rotation
+convention exactly:
+
+- `rx_OpenQASM3(θ) = [[cos(θ/2), -i*sin(θ/2)], [-i*sin(θ/2), cos(θ/2)]] = RX(θ)`
+- `ry_OpenQASM3(θ) = [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]] = RY(θ)`
+- `rz_OpenQASM3(θ) = [[exp(-i*θ/2), 0], [0, exp(i*θ/2)]] = RZ(θ)`
+
+Accordingly, exact parsing or canonicalization must preserve the same angle
+parameter, and exact emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those
+same-name textual spellings must emit the same angle. The standard-library
+controlled forms `crx`, `cry`, and `crz` inherit that same angle-preserving,
+no-extra-compensation rule: each denotes identity on the control-0 subspace and
+the exact corresponding one-qubit operator on the control-1 subspace.
 
 Worked exact-translation examples:
 
@@ -312,9 +318,10 @@ Worked exact-translation examples:
   `exp(-i*π/2) * H`. Exact emission of the internal alias `U2(0, π)` as textual
   `u2(0, π)` therefore needs compensating `gphase(π/2)` in the same scope, or
   another phase-exact lowering.
-- By contrast, the same-name textual rotations require no compensation: internal
-  `rz(θ)` emits as textual `rz(θ)` with the same angle and parses back with the
-  same angle; it must not be rewritten as `p(θ)` plus any implicit hidden phase
+- By contrast, the same-name textual rotations already have the exact same
+  matrices stated above and therefore require no compensation: internal `rz(θ)`
+  emits as textual `rz(θ)` with the same angle and parses back with the same
+  angle; it must not be rewritten as `p(θ)` plus any implicit hidden phase
   fixup.
 
 For deterministic exact ZYZ decomposition of
@@ -527,15 +534,30 @@ Normative examples:
   OPENQASM 3.0;
   include "stdgates.inc";
   input angle[64] theta;
+  gphase(pi/7);
+  qubit q;
+  x q;
+  ```
+
+  Here `pi/7` is valid at the top-level scope entry and immutable, so the phase
+  is hoistable within the top-level scope, but it is not foldable into the
+  canonical top-level scalar because it no longer lies in the maximal leading
+  run immediately after the include directives. It remains an ordinary
+  zero-qubit instruction in source order.
+- Non-hoistable top-level declaration-dependent phase:
+
+  ```qasm
+  OPENQASM 3.0;
+  include "stdgates.inc";
+  input angle[64] theta;
   gphase(theta);
   qubit q;
   x q;
   ```
 
-  Here `theta` is immutable and already in scope when the statement executes, so
-  the phase is hoistable within the top-level scope, but it is not foldable into
-  the canonical top-level scalar because it no longer lies in the maximal
-  leading run immediately after the include directives. It remains an ordinary
+  Here `theta` is immutable once declared, but it is not already in scope at the
+  top-level scope entry. Therefore this phase is not hoistable to that entry and
+  cannot fold into the canonical top-level scalar; it must remain an ordinary
   zero-qubit instruction in source order.
 - Non-hoistable branch-local phase:
 
@@ -829,7 +851,8 @@ following phase-sensitive cases:
   emission and extracted `π/4` on parse; verify textual `cu(π/2, 0, π, 0)`
   parses to internal `CU(π/2, 0, π, π/4)`; verify `u2` and `u3` apply the
   `-(φ+λ)/2` compensation; verify same-name textual `rx` / `ry` / `rz` and `crx`
-  / `cry` / `crz` preserve the angle with no extra phase bookkeeping.
+  / `cry` / `crz` preserve the exact matrices from Section 2.5 and the same
+  angle with no extra phase bookkeeping.
 - **ZYZ structural branches and lift choice:** include `I`, `-I`, a generic
   diagonal `SU(2)` case `diag(exp(-i*ζ), exp(i*ζ))`, a generic anti-diagonal
   `SU(2)` case `[[0, -exp(-i*ζ)], [exp(i*ζ), 0]]`, at least one generic
@@ -842,8 +865,10 @@ following phase-sensitive cases:
   special case.
 - **Scope-global vs statement-level phase:** verify a leading bare top-level
   `gphase` folds into `globalPhase`, verify a hoistable but non-foldable
-  top-level `gphase` after declarations remains an instruction, and verify
-  branch-local or loop-local `gphase` is not hoisted out of its owning body.
+  top-level `gphase` after declarations remains an instruction, verify a
+  declaration-dependent top-level `gphase` is not treated as hoistable/foldable,
+  and verify branch-local or loop-local `gphase` is not hoisted out of its
+  owning body.
 - **Round-trip semantics:** verify `deserialize(serialize(circuit))` preserves
   total unitary including global phase for purely unitary scopes, and preserves
   statement order plus branch-local phase behavior for scopes with measurement,
