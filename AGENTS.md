@@ -226,6 +226,39 @@ exactly. More generally, exact ZYZ recomposition of an arbitrary single-qubit
 unitary must also track the separate overall phase parameter `α`; omitting
 either contribution causes exact matrix comparisons to fail.
 
+Important naming distinction: within this specification, bare `U(θ, φ, λ)`
+refers to the library's **internal/API gate** defined above unless the text
+explicitly says "textual OpenQASM 3 `U`". The textual OpenQASM 3 built-in
+single-qubit gate of the same spelling uses a different global-phase convention.
+Relative to this library's internal gate:
+
+```
+U_OpenQASM3(θ, φ, λ) = exp(i*θ/2) * U(θ, φ, λ)
+```
+
+Therefore exact translation between the internal API and textual OpenQASM 3 must
+carry this phase explicitly. If an unconditional internal `U(θ, φ, λ)` is
+emitted as textual OpenQASM 3 `U(θ, φ, λ)`, add compensating `gphase(-θ/2)` in
+the same scope, or use any phase-exact equivalent lowering. Conversely, if
+textual OpenQASM 3 `U(θ, φ, λ)` is parsed or canonicalized to the internal
+`U(θ, φ, λ)`, record the extracted phase `θ/2` explicitly in the same semantic
+scope. If the occurrence is controlled or otherwise non-hoistable, preserve that
+phase on the enabled subspace instead of hoisting it.
+
+The same distinction applies to the controlled form. In this library,
+`CU(θ, φ, λ, γ)` means identity on the control-0 subspace and
+`exp(i*γ) * U(θ, φ, λ)` on the control-1 subspace. Textual OpenQASM 3
+`cu(θ, φ, λ, γ)` instead satisfies:
+
+```
+cu_OpenQASM3(θ, φ, λ, γ) = CU(θ, φ, λ, γ + θ/2)
+```
+
+So exact parsing of textual OpenQASM 3 `cu` into the library's internal `CU`
+adds `θ/2` to the stored fourth parameter, while exact emission of the library's
+internal `CU` as textual OpenQASM 3 `cu` subtracts `θ/2` from the stored fourth
+parameter or uses another phase-exact lowering.
+
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
 
@@ -277,8 +310,9 @@ the textual OpenQASM 3 compatibility spellings `u2` / `u3` may always be
 emitted, parsed, or round-tripped as simple phase-free synonyms. For exact
 OpenQASM 3 round-tripping, preserve the selected standard-library semantics of
 textual `u1` / `u2` / `u3`; if that requires an explicit compensating
-`gphase(...)` or `globalPhase`, carry it explicitly rather than silently
-collapsing it into a neighboring named `U`.
+`gphase(...)`, `globalPhase`, or conversion through textual OpenQASM 3 `U` with
+exact compensation, carry it explicitly rather than silently collapsing it into
+a neighboring same-name library gate.
 
 #### 6. Global Phase Tracking
 
@@ -292,8 +326,12 @@ multiplying the scope unitary by that scalar after the body acts. For scopes
 that also contain measurement or classical control flow, the same scalar still
 multiplies every branch amplitude uniformly and therefore does not change
 measurement probabilities, collapse statistics, or branch predicates. It is
-still required for `getStateVector` correctness and for exact matrix/state
-comparisons on unitary subscopes. `globalPhase` is stored exactly as an angle
+still required for exact amplitude/state inspection of any unitary scope or
+unitary subscope, and for exact matrix/state comparisons on unitary subscopes.
+APIs that expose a single final state vector are therefore defined only for
+evaluation modes whose executed semantics remain unitary; this library's default
+`getStateVector` follows that restriction and is not a branch-merging API for
+general measurement-driven programs. `globalPhase` is stored exactly as an angle
 expression, not only as a floating-point number. However, it stores only phase
 that is both **hoistable** to the entry of the owning scope without changing
 semantics and **foldable** into that scope's canonical leading phase
@@ -314,7 +352,11 @@ already in the canonical leading-phase position for the representation being
 built. In particular, a builder-origin bare `globalPhaseGate(θ)` denotes
 canonical leading scope-global phase only when its expression is already valid
 at the owning scope's entry under the same hoistability and immutability rule
-above. A declaration-dependent, mutable-state-dependent, or otherwise
+above. For the canonical programmatic builder API, free symbolic `Param` leaves
+in that expression are treated as already in scope at the owning scope's entry
+unless a richer front-end explicitly models them as loop variables or mutable
+classical storage; the builder does not impose a later declaration order on such
+symbols. A declaration-dependent, mutable-state-dependent, or otherwise
 non-hoistable programmatic zero-qubit phase is not represented by the
 `globalPhase` scalar; it must remain an ordinary instruction, or be rejected by
 APIs that expose only canonical scope-global phase. For parsed OpenQASM 3,
@@ -332,14 +374,17 @@ introduced before that point (for example via earlier includes), but not on
 declarations that first appear later in the same source unit.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
-expressions may be reduced modulo `2π` only when that reduction is exact.
-Implementations are **not** required to prove that an arbitrary symbolic
-expression equals `0` or `2πk`; if they cannot prove that the scalar is exactly
-unity, they must preserve and serialize the stored expression. In this document,
-"normalized" scope-global phase means "at most one leading bare scope-level
-`gphase(...)` per scope, emitted in the implementation's canonical `AngleExpr`
-form"; it does **not** require aggressive symbolic rewriting or inexact
-floating-point simplification.
+expressions may be reduced modulo `2π` only when that reduction is exact. This
+exactness requirement is semantic rather than approximate: a decimal floating
+literal is not by itself proof of exact equality to `2πk` unless the
+implementation preserves an exact representation or parser rule establishing
+that identity. Implementations are **not** required to prove that an arbitrary
+symbolic expression equals `0` or `2πk`; if they cannot prove that the scalar is
+exactly unity, they must preserve and serialize the stored expression. In this
+document, "normalized" scope-global phase means "at most one leading bare
+scope-level `gphase(...)` per scope, emitted in the implementation's canonical
+`AngleExpr` form"; it does **not** require aggressive symbolic rewriting or
+inexact floating-point simplification.
 
 The semantic zero-qubit phase operation `globalPhaseGate(θ)` has 1×1 matrix
 `[[exp(i*θ)]]`, where `θ` may itself be symbolic. In the canonical programmatic
@@ -350,10 +395,14 @@ the hoistability rule above; in that case it increments the owning scope's
 stream rather than as a qubit instruction. A programmatic zero-qubit phase that
 is not valid there is not canonical scope-global phase and must instead remain
 an ordinary instruction or be rejected by APIs that do not expose
-instruction-level `gphase`. When circuits/scopes are composed, their global
-phases add. When a circuit/scope is inverted, its global phase is negated.
-`compose`, `toGate`, `toInstruction`, gate-definition bodies, subroutine bodies,
-and QASM round-tripping must preserve this scalar exactly.
+instruction-level `gphase`. The canonical programmatic route for such an
+explicit statement-level phase is the low-level append/raw-instruction API:
+append an operation named `gphase` with zero qubits and the desired `AngleExpr`,
+plus any modifiers or annotations that make it non-foldable. When
+circuits/scopes are composed, their global phases add. When a circuit/scope is
+inverted, its global phase is negated. `compose`, `toGate`, `toInstruction`,
+gate-definition bodies, subroutine bodies, and QASM round-tripping must preserve
+this scalar exactly.
 
 A bare `gphase(θ);` parsed from OpenQASM 3 is folded into the owning scope's
 `globalPhase` only when it is foldable by the rule above. For parsed OpenQASM,
@@ -522,23 +571,26 @@ The OpenQASM 3 serializer must preserve both hoistable scope-global phase and
 statement-level `gphase` operations. A hoistable `globalPhase` may be omitted
 only when the implementation can prove that its scalar `exp(i * globalPhase)` is
 exactly `1`. Exact constant folding and exact modulo-`2π` reduction of purely
-numeric literals are allowed; implementations are not required to prove that
-arbitrary symbolic expressions equal `2πk`, and if exact unity cannot be proved
-they must preserve and emit the stored expression. "Normalized" here means "emit
-at most one leading bare, unmodified, unannotated `gphase(θ);` per scope for the
-hoistable scalar, using the implementation's canonical stored `AngleExpr` form";
-it does not require aggressive symbolic rewriting or inexact floating
-simplification. When a scope's hoistable `globalPhase` is not provably unity,
-emit at most one normalized leading bare, unmodified, unannotated `gphase(θ);`
-for that scalar. For a braced scope, emit it immediately after that scope's
-opening brace. For the top-level program scope, emit it immediately after the
-`OPENQASM ...;` line and any required `include` directives, and before later
-declarations or executable statements, **only** when the expression is valid
-there. A normalized top-level hoisted phase may depend on literals, built-in
-constants, and names already in scope at that point, but not on declarations
-that first appear later in the same program unit. A declaration-dependent phase
-is therefore not foldable into the top-level scalar for normalized OpenQASM
-output and must remain as an explicit statement in valid source order.
+numeric literals are allowed, but a decimal floating literal is not by itself
+proof of exact equality to `2πk` unless the implementation preserves an exact
+representation or parser rule establishing that identity; implementations are
+not required to prove that arbitrary symbolic expressions equal `2πk`, and if
+exact unity cannot be proved they must preserve and emit the stored expression.
+"Normalized" here means "emit at most one leading bare, unmodified, unannotated
+`gphase(θ);` per scope for the hoistable scalar, using the implementation's
+canonical stored `AngleExpr` form"; it does not require aggressive symbolic
+rewriting or inexact floating simplification. When a scope's hoistable
+`globalPhase` is not provably unity, emit at most one normalized leading bare,
+unmodified, unannotated `gphase(θ);` for that scalar. For a braced scope, emit
+it immediately after that scope's opening brace. For the top-level program
+scope, emit it immediately after the `OPENQASM ...;` line and any required
+`include` directives, and before later declarations or executable statements,
+**only** when the expression is valid there. A normalized top-level hoisted
+phase may depend on literals, built-in constants, and names already in scope at
+that point, but not on declarations that first appear later in the same program
+unit. A declaration-dependent phase is therefore not foldable into the top-level
+scalar for normalized OpenQASM output and must remain as an explicit statement
+in valid source order.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
@@ -559,13 +611,16 @@ same total unitary including global phase. For non-unitary scopes, it means the
 same declarations, executable-statement order, branch-local phase behavior, and
 evaluation order of any non-foldable `gphase`.
 
-OpenQASM 3 compatibility aliases such as `u1`, `u2`, and `u3` must likewise be
-handled phase-exactly according to the selected standard library, not by
-assuming they are always identical to any similarly named library API alias. A
-serializer may always lower them to phase-exact `p` / `u` plus explicit
-`gphase(...)` compensation instead of emitting the compatibility spelling
-directly. A deserializer may likewise canonicalize them into `P`, `U`, and
-explicit `globalPhase` so long as exact phase-aware semantics are preserved.
+Textual OpenQASM 3 built-in `U`, standard-library `cu`, and compatibility
+aliases such as `u1`, `u2`, and `u3` must likewise be handled phase-exactly
+according to the selected standard library, not by assuming they are identical
+to similarly named library API gates. A serializer may lower compatibility
+spellings to phase-exact `p` / `U` plus explicit `gphase(...)` compensation, and
+may lower textual `cu` to a phase-exact `ctrl @ U` form plus exact
+enabled-subspace phase compensation, instead of emitting those spellings
+directly. A deserializer may likewise canonicalize any of these into internal
+`P`, `U`, `CU`, and explicit `globalPhase` or statement-level `gphase` so long
+as exact phase-aware semantics are preserved.
 
 ---
 
@@ -1195,7 +1250,9 @@ return identity.
 
 OpenQASM 3 note: textual compatibility spellings such as `u2` / `u3` must be
 serialized/deserialized phase-exactly and may require explicit `gphase`
-compensation instead of simple name-preserving round-trip.
+compensation instead of simple name-preserving round-trip. The formulas above
+use the library's internal `U`, not the textual OpenQASM 3 built-in `U`; the
+same phase-aware distinction also applies to textual OpenQASM 3 `cu`.
 
 ---
 
@@ -2169,12 +2226,17 @@ scope-global phase. Therefore `theta` must already be valid at the owning
 scope's entry under Section 2.6. A declaration-dependent or otherwise
 non-hoistable programmatic zero-qubit phase must instead remain an ordinary
 instruction, or be rejected by APIs that expose only canonical scope-global
-phase. Deserialized OpenQASM bare `gphase(theta)` that is non-hoistable, or
-simply not foldable under Section 2.6 because it is not in canonical leading
-position, must instead remain an ordinary zero-qubit instruction. A
-control-bearing form such as `ctrl @ gphase(theta)` is not scope-global and must
-be represented as an instruction (or desugared to the exact enabled-subspace
-phase operator) rather than absorbed into `globalPhase`.
+phase. In the canonical builder API, free symbolic `Param` leaves are treated as
+scope-entry symbols by construction; loop parameters and mutable classical
+values are not. Deserialized OpenQASM bare `gphase(theta)` that is
+non-hoistable, or simply not foldable under Section 2.6 because it is not in
+canonical leading position, must instead remain an ordinary zero-qubit
+instruction. A control-bearing form such as `ctrl @ gphase(theta)` is not
+scope-global and must be represented as an instruction (or desugared to the
+exact enabled-subspace phase operator) rather than absorbed into `globalPhase`.
+The programmatic route for such an explicit statement-level phase is the
+low-level append/raw-instruction API, using an operation named `gphase` with
+zero qubits and the desired `AngleExpr` parameter.
 
 **Single-Qubit Gates:**
 
@@ -2273,7 +2335,12 @@ transformations instead of preserving those helper names.
   `negctrl @` modifier. Conditions on control qubits being |0> instead of |1>.
 - `qc.inv(gate, qubits)` — apply `inv @` modifier. Replaces gate U with U†.
 - `qc.pow(k, gate, qubits)` — apply `pow(k) @` modifier. Applies gate to the kth
-  power. Positive integer k repeats; negative k repeats inverse.
+  power. Positive integer `k` repeats the gate `k` times; negative integer `k`
+  repeats the inverse `|k|` times; non-integer real `k` uses spectral
+  decomposition with the principal complex power of each eigenvalue. When exact
+  surface normalization matters, such as `pow(k) @ gphase(...)`, follow Section
+  2.6 and keep the explicit `pow(k)` form whenever exact bare normalization is
+  unavailable.
 
 Gate modifiers can be chained: `ctrl @ inv @ U` means controlled-inverse-U.
 Multiple modifiers are stored in order on the instruction's `modifiers` field
@@ -2377,7 +2444,12 @@ in classical expressions and control flow conditions.
   exact globalPhase in the produced reusable definition/metadata.
 - `qc.toInstruction(label?)` — convert to reusable instruction, preserving the
   exact globalPhase of the wrapped body.
-- `qc.append(operation, qubitIndices, clbitIndices)` — low-level append.
+- `qc.append(operation, qubitIndices = [], clbitIndices = [], params = [], options?)`
+  — low-level append of an arbitrary instruction. `options` carries any
+  remaining instruction fields such as condition, modifiers, label, annotations,
+  or nested bodies. This is the programmatic route for explicit statement-level
+  `gphase` instructions that must remain in source order rather than normalize
+  into `globalPhase`.
 - `qc.inverse()` — return new circuit with reversed, daggered gates. Negated
   global phase. Only unitary circuits.
 
@@ -2655,9 +2727,14 @@ Percentages are computed from shot counts:
 
 #### Additional Public Methods
 
-- `getStateVector(circuit, params?) -> Complex[]` — Run the circuit without
-  measurement collapse (skip measure and reset). Returns the raw state vector.
-  Useful for testing and introspection.
+- `getStateVector(circuit, params?) -> Complex[]` — Run the circuit in
+  unitary-inspection mode and return the raw state vector. This API is defined
+  only when execution has a single well-defined final pure state: for example, a
+  measurement-free circuit, or a circuit with only terminal measurements that
+  can be discarded because they do not feed reset or later classical control.
+  Reject circuits with mid-circuit measurement, reset, or classically controlled
+  quantum evolution whose executed behavior depends on sampled classical
+  outcomes. Useful for testing and introspection.
 
 **Tests (minimum 60):**
 
@@ -2668,6 +2745,11 @@ Percentages are computed from shot counts:
 - GHZ state `H(0), CX(0,1), CX(0,2)` -> ~`{ "000": 50, "111": 50 }`.
 - `getStateVector` for `H|0>` ~ `[1/sqrt(2), 1/sqrt(2)]`.
 - `getStateVector` for Bell state ~ `[1/sqrt(2), 0, 0, 1/sqrt(2)]`.
+- `getStateVector` ignores terminal measurements that do not feed reset or later
+  classical control.
+- `getStateVector` rejects circuits with mid-circuit measurement, reset, or
+  classically controlled quantum evolution whose behavior depends on sampled
+  outcomes.
 - Every single-qubit gate applied to |0>: verify `getStateVector` matches gate's
   first column.
 - Every single-qubit gate applied to |1>: verify `getStateVector` matches gate's
@@ -2746,10 +2828,9 @@ also publicly exposed so users can invoke individual passes.
     `globalPhase` only after all modifiers have been expanded and only if the
     result is still a bare, unannotated, foldable scope phase as defined in
     Section 2.6. `inv @ gphase(expr)` becomes `gphase(-expr)`.
-    `pow(k) @
-    gphase(expr)` becomes bare `gphase(...)` only when that
-    rewrite is exact under the same matrix-power rule: always for integer `k`,
-    and for non-integer `k` only after exact reduction of the base phase to its
+    `pow(k) @ gphase(expr)` becomes bare `gphase(...)` only when that rewrite is
+    exact under the same matrix-power rule: always for integer `k`, and for
+    non-integer `k` only after exact reduction of the base phase to its
     principal representative in `(-π, π]`. If the resulting bare phase is
     declaration-dependent, mutable-state-dependent, late-position, or otherwise
     non-foldable, keep it as a zero-qubit instruction; if exact bare
@@ -3708,10 +3789,11 @@ Implements the `Serializer` interface for OpenQASM 3 format. Must handle the
 the circuit builder's gate methods.
 
 Because this library tracks global phase exactly, the serializer/deserializer
-must treat OpenQASM compatibility spellings such as `u1`, `u2`, and `u3`
-phase-exactly. It may canonicalize them to `p`, `u`, and explicit leading or
+must treat textual OpenQASM 3 built-in `U`, standard-library `cu`, and
+compatibility spellings such as `u1`, `u2`, and `u3` phase-exactly. It may
+canonicalize them to internal `P`, `U`, `CU`, and explicit leading or
 statement-level `gphase(...)` instead of assuming they are simple synonyms for
-the library's internal API aliases.
+same-name library API gates.
 
 **`serialize(circuit) -> string`**
 
@@ -4000,18 +4082,20 @@ Must handle all features listed above:
 - `const`, `input`, `output` variable modifiers
 - `array` declarations with dimensions
 - All gate instructions with parameters
-- OpenQASM compatibility aliases from `stdgates.inc` (`phase`, `cphase`, `id`,
-  `u1`, `u2`, `u3`, `CX`) with exact phase-aware semantics, even when internally
-  canonicalized to `P`, `U`, `CX`, and explicit `globalPhase`
+- Textual OpenQASM 3 built-in `U` with exact phase-aware semantics, even when
+  internally canonicalized to the library's `U` plus explicit `globalPhase` or
+  statement-level `gphase`
+- Phase-sensitive spellings from `stdgates.inc` (`phase`, `cphase`, `id`, `u1`,
+  `u2`, `u3`, `cu`, `CX`) with exact phase-aware semantics, even when internally
+  canonicalized to `P`, `U`, `CU`, `CX`, and explicit `globalPhase`
 - Custom gate definitions (`gate name(params) qargs { body }`)
 - Gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`) including chains
 - Gate broadcasting (gate applied to register)
 - Measurement, reset, barrier, delay
 - Bare, unmodified global phase (`gphase`), folded into the current scope's
   scalar `globalPhase` only when it is foldable under Section 2.6. After
-  modifier expansion, `inv @ gphase` / `pow(k) @
-  gphase` may also fold if the
-  resulting bare phase is foldable; control- bearing or otherwise non-foldable
+  modifier expansion, `inv @ gphase` / `pow(k) @ gphase` may also fold if the
+  resulting bare phase is foldable; control-bearing or otherwise non-foldable
   `gphase` stays an ordinary instruction or equivalent relative-phase operator
 - Classical expressions: arithmetic, bitwise, comparison, logical operators
 - Assignment operators (`=`, `+=`, `-=`, `*=`, etc.)
@@ -4073,9 +4157,17 @@ Must handle all features listed above:
   `gphase(pi);`.
 - Verify `ctrl @ gphase(theta) q[0];` round-trips as a modifier-bearing
   instruction and is not folded into the surrounding scope `globalPhase`.
+- Verify textual OpenQASM 3 built-in `U(theta, phi, lambda)` parses and
+  reserializes without silent phase loss; canonicalization to the library's
+  internal `U` must preserve the extracted `theta/2` phase explicitly.
+- Verify textual OpenQASM 3 `cu(theta, phi, lambda, gamma)` parses and
+  reserializes without silent phase loss; conversion to the library's internal
+  `CU` must add `theta/2` to the stored fourth parameter, and exact emission
+  back to textual `cu` must subtract it again or use another phase-exact
+  lowering.
 - Verify OpenQASM compatibility `u2` / `u3` parse and reserialize without silent
-  phase loss; exact round-trip may use `u` plus explicit `gphase(...)` instead
-  of re-emitting the same compatibility spelling.
+  phase loss; exact round-trip may use textual `U` plus explicit `gphase(...)`
+  instead of re-emitting the same compatibility spelling.
 - Control flow: serialize/deserialize `if_test` with true and false body.
 - Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
@@ -4292,8 +4384,8 @@ The README must contain the following sections in order:
    - **GHZ state**: Build a 3-qubit GHZ circuit, simulate, print results.
    - **Parameterized circuit**: Create an `RX(theta)` circuit using `Param`,
      bind different values, simulate each.
-   - **State vector inspection**: Use `getStateVector` to inspect amplitudes
-     without measurement collapse.
+   - **State vector inspection**: Use `getStateVector` on a measurement-free
+     circuit to inspect amplitudes.
    - **Bloch sphere**: Compute and display Bloch coordinates for a qubit.
    - **OpenQASM 3 round-trip**: Build a circuit, serialize to OpenQASM 3, print
      the source, deserialize back, simulate.
