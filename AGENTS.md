@@ -257,10 +257,15 @@ Important naming distinction: within this specification, bare `U(θ, φ, λ)`
 refers to the library's **internal/API gate** defined above unless the text
 explicitly says "textual OpenQASM 3 `U`". The textual OpenQASM 3 built-in
 single-qubit gate of the same spelling uses a different global-phase convention.
-Elsewhere in this section and in later decomposition rules, arbitrary unitary
-matrices/operators are written as `M` or `W` to avoid overloading the gate name
-`U`. Relative to this library's internal gate, the textual OpenQASM 3 built-in
-gate is:
+Unless a later version-specific rule is stated explicitly, the exact textual
+relations in this phase-convention section use the OpenQASM 3.1 language
+built-ins together with the OpenQASM 3.1 `stdgates.inc` standard-library
+semantics; if a future OpenQASM revision changes any of those definitions, this
+document's formulas remain the normative library contract until this
+specification is revised. Elsewhere in this section and in later decomposition
+rules, arbitrary unitary matrices/operators are written as `M` or `W` to avoid
+overloading the gate name `U`. Relative to this library's internal gate, the
+textual OpenQASM 3 built-in gate is:
 
 ```
 U_OpenQASM3(θ, φ, λ)
@@ -334,6 +339,10 @@ Worked exact-translation examples:
   `exp(-i*π/2) * H`. Exact emission of the internal alias `U2(0, π)` as textual
   `u2(0, π)` therefore needs compensating `gphase(π/2)` in the same scope, or
   another phase-exact lowering.
+- Textual `u3(θ, φ, λ)` equals `exp(-i*(θ+φ+λ)/2) * U3(θ, φ, λ)` and therefore
+  equals `exp(-i*θ/2) * RZ(φ) * RY(θ) * RZ(λ)`. Exact emission of the internal
+  alias `U3(θ, φ, λ)` as textual `u3(θ, φ, λ)` therefore needs compensating
+  `gphase((θ+φ+λ)/2)` in the same scope, or another phase-exact lowering.
 - By contrast, the same-name textual rotations require neither parameter
   rescaling nor additional `gphase` compensation: textual `rz(θ)` equals
   internal `RZ(θ)` exactly, so internal `RZ(θ)` emits as textual `rz(θ)` and
@@ -421,19 +430,22 @@ phase-free synonyms. The exact textual relations are:
 ```
 u1_OpenQASM3(λ) = U1(λ) = P(λ)
 u2_OpenQASM3(φ, λ) = exp(-i*(φ+λ)/2) * U2(φ, λ) = RZ(φ) * RY(π/2) * RZ(λ)
-u3_OpenQASM3(θ, φ, λ) = exp(-i*(φ+λ)/2) * U3(θ, φ, λ) = RZ(φ) * RY(θ) * RZ(λ)
+u3_OpenQASM3(θ, φ, λ) = exp(-i*(θ+φ+λ)/2) * U3(θ, φ, λ)
+                        = exp(-i*θ/2) * RZ(φ) * RY(θ) * RZ(λ)
 ```
 
-Therefore exact parsing of textual `u2` / `u3` into the library's internal `U2`
-/ `U3` must record the extracted phase `-(φ+λ)/2` explicitly in the same
-semantic scope. Exact emission of internal `U2` / `U3` as those textual
-spellings must add compensating `gphase((φ+λ)/2)` in the same scope, or use any
-other phase-exact lowering. As with textual `U`, if the occurrence is
-controlled, preserve that phase locally on the enabled subspace instead of
-hoisting it. If it is unconditional but otherwise non-hoistable or non-foldable
-in its owning scope, preserve it as an ordinary `gphase` in valid evaluation
-order instead. In all cases, never silently collapse it into a neighboring
-same-name library gate.
+Therefore exact parsing of textual `u2` into the library's internal `U2` must
+record the extracted phase `-(φ+λ)/2` explicitly in the same semantic scope,
+while exact parsing of textual `u3` into the library's internal `U3` must record
+the extracted phase `-(θ+φ+λ)/2` explicitly in the same semantic scope. Exact
+emission of internal `U2` / `U3` as those textual spellings must add
+compensating `gphase((φ+λ)/2)` for `u2` and `gphase((θ+φ+λ)/2)` for `u3` in the
+same scope, or use any other phase-exact lowering. As with textual `U`, if the
+occurrence is controlled, preserve that phase locally on the enabled subspace
+instead of hoisting it. If it is unconditional but otherwise non-hoistable or
+non-foldable in its owning scope, preserve it as an ordinary `gphase` in valid
+evaluation order instead. In all cases, never silently collapse it into a
+neighboring same-name library gate.
 
 #### 6. Global Phase Tracking
 
@@ -497,13 +509,15 @@ otherwise non-hoistable programmatic zero-qubit phase is not represented by the
 APIs that expose only canonical scope-global phase. For parsed OpenQASM 3,
 foldable means belonging to the maximal leading run of bare, unmodified,
 unannotated, hoistable `gphase(...)` statements in that scope: at top level,
-immediately after the `OPENQASM` line and required `include` directives; in a
-braced scope, immediately after the opening `{`. Hoistable but non-foldable
+immediately after the `OPENQASM` line and the leading contiguous block of
+top-level `include` directives that must remain before later declarations or
+executable statements in the normalized program (`required include directives`);
+in a braced scope, immediately after the opening `{`. Hoistable but non-foldable
 `gphase` statements remain ordinary zero-qubit instructions in source order. If
 unresolved symbols remain, any operation that needs a concrete complex scalar
 must bind them first. For the top-level program scope, "already in scope at that
-scope's entry" means after the `OPENQASM` line and required `include` directives
-but before later declarations in that program unit. Therefore a top-level
+scope's entry" means after the `OPENQASM` line and that same leading include
+block but before later declarations in that program unit. Therefore a top-level
 foldable scalar may depend on literals, built-in constants, and names already
 introduced before that point (for example via earlier includes), but not on
 declarations that first appear later in the same source unit.
@@ -815,18 +829,18 @@ rewriting or inexact floating simplification. When a scope's hoistable
 `globalPhase` is not provably unity, emit at most one normalized leading bare,
 unmodified, unannotated `gphase(θ);` for that scalar. For a braced scope, emit
 it immediately after that scope's opening brace. For the top-level program
-scope, emit it immediately after the `OPENQASM ...;` line and any required
-`include` directives, and before later declarations or executable statements,
-**only** when the expression is valid there. A normalized top-level hoisted
-phase may depend on literals, built-in constants, and names already in scope at
-that point, but not on declarations that first appear later in the same program
-unit. If a stored top-level `globalPhase` depends on names that are not yet in
-scope at that canonical leading position, the serializer must not emit it there;
-instead it must preserve semantics by emitting an ordinary bare `gphase(θ);` at
-the earliest valid source position after the declarations that bring those names
-into scope. A declaration-dependent phase is therefore not foldable into the
-top-level scalar for normalized OpenQASM output and must remain as an explicit
-statement in valid source order.
+scope, emit it immediately after the `OPENQASM ...;` line and the same leading
+required-include block defined by Section 2.6, and before later declarations or
+executable statements, **only** when the expression is valid there. A normalized
+top-level hoisted phase may depend on literals, built-in constants, and names
+already in scope at that point, but not on declarations that first appear later
+in the same program unit. If a stored top-level `globalPhase` depends on names
+that are not yet in scope at that canonical leading position, the serializer
+must not emit it there; instead it must preserve semantics by emitting an
+ordinary bare `gphase(θ);` at the earliest valid source position after the
+declarations that bring those names into scope. A declaration- dependent phase
+is therefore not foldable into the top-level scalar for normalized OpenQASM
+output and must remain as an explicit statement in valid source order.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
@@ -885,13 +899,13 @@ following phase-sensitive cases:
   round-trips against textual `U(π/2, 0, π)` with compensating `gphase(-π/4)` on
   emission and extracted `π/4` on parse; verify textual `cu(π/2, 0, π, 0)`
   parses to internal `CU(π/2, 0, π, π/4)`; verify `u2` and `u3` apply the
-  `-(φ+λ)/2` compensation; verify same-name textual `p` / `rx` / `ry` / `rz` and
-  `cp` / `crx` / `cry` / `crz` are exact same-angle matches from Section 2.5
-  with no extra phase bookkeeping, so parsing textual `rx(θ)` yields internal
-  `RX(θ)` and emitting internal `RX(θ)` yields textual `rx(θ)`; likewise,
-  parsing/emitting textual `p(λ)` / `cp(λ)` yields internal `P(λ)` / `CP(λ)`,
-  and textual `ry` / `rz` / `cry` / `crz` map exactly to internal `RY` / `RZ` /
-  `CRY` / `CRZ` with the same parameter.
+  `-(φ+λ)/2` and `-(θ+φ+λ)/2` compensations, respectively; verify same-name
+  textual `p` / `rx` / `ry` / `rz` and `cp` / `crx` / `cry` / `crz` are exact
+  same-angle matches from Section 2.5 with no extra phase bookkeeping, so
+  parsing textual `rx(θ)` yields internal `RX(θ)` and emitting internal `RX(θ)`
+  yields textual `rx(θ)`; likewise, parsing/emitting textual `p(λ)` / `cp(λ)`
+  yields internal `P(λ)` / `CP(λ)`, and textual `ry` / `rz` / `cry` / `crz` map
+  exactly to internal `RY` / `RZ` / `CRY` / `CRZ` with the same parameter.
 - **ZYZ structural branches and lift choice:** include `I`, `-I`, a generic
   diagonal `SU(2)` case `diag(exp(-i*ζ), exp(i*ζ))`, a generic anti-diagonal
   `SU(2)` case `[[0, -exp(-i*ζ)], [exp(i*ζ), 0]]`, at least one generic
@@ -4555,9 +4569,9 @@ Must handle all features listed above:
   lowering.
 - Verify OpenQASM compatibility `u2` / `u3` parse and reserialize without silent
   phase loss; conversion to the library's internal `U2` / `U3` must preserve the
-  extracted `-(phi+lambda)/2` phase explicitly, and exact round-trip may use
-  textual `U` plus explicit `gphase(...)` instead of re-emitting the same
-  compatibility spelling.
+  extracted `-(phi+lambda)/2` and `-(theta+phi+lambda)/2` phases explicitly,
+  respectively, and exact round-trip may use textual `U` plus explicit
+  `gphase(...)` instead of re-emitting the same compatibility spelling.
 - Control flow: serialize/deserialize `if_test` with true and false body.
 - Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
