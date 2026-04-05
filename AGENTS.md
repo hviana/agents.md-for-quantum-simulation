@@ -229,6 +229,9 @@ either contribution causes exact matrix comparisons to fail.
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
 
+Here and throughout this section, `wrapToPi(x)` means normalization to
+`(-π, π]`, with the negative-real-axis boundary represented by `π`, not `-π`.
+
 - `γ ∈ [0, π]`
 - `β, δ ∈ [-π, π]`
 - `α` is fixed by the principal half-argument of the determinant:
@@ -296,20 +299,25 @@ or a reachable nested scope do not. If an implementation cannot prove that a
 referenced value is immutable for the whole scope, it must treat the phase
 statement as non-hoistable. A phase is foldable into `globalPhase` only if it is
 already in the canonical leading-phase position for the representation being
-built. In particular, builder-origin `globalPhaseGate(θ)` is foldable by
-construction. For parsed OpenQASM 3, foldable means belonging to the maximal
-leading run of bare, unmodified, unannotated, hoistable `gphase(...)` statements
-in that scope: at top level, immediately after the `OPENQASM` line and required
-`include` directives; in a braced scope, immediately after the opening `{`.
-Hoistable but non-foldable `gphase` statements remain ordinary zero-qubit
-instructions in source order. If unresolved symbols remain, any operation that
-needs a concrete complex scalar must bind them first. For the top-level program
-scope, "already in scope at that scope's entry" means after the `OPENQASM` line
-and required `include` directives but before later declarations in that program
-unit. Therefore a top-level foldable scalar may depend on literals, built-in
-constants, and names already introduced before that point (for example via
-earlier includes), but not on declarations that first appear later in the same
-source unit.
+built. In particular, a builder-origin bare `globalPhaseGate(θ)` denotes
+canonical leading scope-global phase only when its expression is already valid
+at the owning scope's entry under the same hoistability and immutability rule
+above. A declaration-dependent, mutable-state-dependent, or otherwise
+non-hoistable programmatic zero-qubit phase is not represented by the
+`globalPhase` scalar; it must remain an ordinary instruction, or be rejected by
+APIs that expose only canonical scope-global phase. For parsed OpenQASM 3,
+foldable means belonging to the maximal leading run of bare, unmodified,
+unannotated, hoistable `gphase(...)` statements in that scope: at top level,
+immediately after the `OPENQASM` line and required `include` directives; in a
+braced scope, immediately after the opening `{`. Hoistable but non-foldable
+`gphase` statements remain ordinary zero-qubit instructions in source order. If
+unresolved symbols remain, any operation that needs a concrete complex scalar
+must bind them first. For the top-level program scope, "already in scope at that
+scope's entry" means after the `OPENQASM` line and required `include` directives
+but before later declarations in that program unit. Therefore a top-level
+foldable scalar may depend on literals, built-in constants, and names already
+introduced before that point (for example via earlier includes), but not on
+declarations that first appear later in the same source unit.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
 expressions may be reduced modulo `2π` only when that reduction is exact.
@@ -324,12 +332,16 @@ floating-point simplification.
 The `globalPhaseGate(θ)` operation increments the owning scope's global phase by
 `θ`, where `θ` may itself be symbolic. Its "matrix" is the 1×1 scalar
 `[[exp(i*θ)]]`. In the programmatic builder API, a bare unmodified
-`globalPhaseGate(θ)` denotes foldable scope-global phase and is stored
-separately from the ordinary instruction stream rather than as a qubit
-instruction. When circuits/scopes are composed, their global phases add. When a
-circuit/scope is inverted, its global phase is negated. `compose`, `toGate`,
-`toInstruction`, gate-definition bodies, subroutine bodies, and QASM
-round-tripping must preserve this scalar exactly.
+`globalPhaseGate(θ)` denotes foldable scope-global phase only when `θ` is
+already valid at that scope's entry under the hoistability rule above; in that
+case it is stored separately from the ordinary instruction stream rather than as
+a qubit instruction. A programmatic zero-qubit phase that is not valid there is
+not canonical scope-global phase and must instead remain an ordinary instruction
+or be rejected by APIs that do not expose instruction-level `gphase`. When
+circuits/scopes are composed, their global phases add. When a circuit/scope is
+inverted, its global phase is negated. `compose`, `toGate`, `toInstruction`,
+gate-definition bodies, subroutine bodies, and QASM round-tripping must preserve
+this scalar exactly.
 
 A bare `gphase(θ);` parsed from OpenQASM 3 is folded into the owning scope's
 `globalPhase` only when it is foldable by the rule above. For parsed OpenQASM,
@@ -338,7 +350,9 @@ position for that scope; a leading run of such statements folds by addition.
 Otherwise it remains an ordinary zero-qubit `gphase` instruction in the
 statement stream, preserving expression structure, annotations, and evaluation
 order. Modifier-bearing forms of `gphase`/`globalPhaseGate` are first normalized
-by modifier expansion: `inv @ gphase(θ)` becomes bare `gphase(-θ)` and
+by modifier expansion. Chained modifiers in this section are applied
+right-to-left (innermost first), so `ctrl @ inv @ gphase(θ)` means control of
+`gphase(-θ)`: `inv @ gphase(θ)` becomes bare `gphase(-θ)` and
 `pow(k) @ gphase(θ)` becomes bare `gphase(k*θ)`. If the normalized result is
 then bare, unannotated, and foldable, it may fold into the owning scope's
 scalar. Any remaining control-bearing, annotation-bearing, or otherwise
@@ -392,6 +406,12 @@ and after both pieces of the construction so the enabled pattern becomes
 all-ones, apply the same `E_α` plus controlled-`V` construction in that
 normalized frame, then undo the `X` conjugations. In circuit-time order:
 `X(negctrls) → E_α(all active controls) → Controlled-V(normalized controls, targets) → X(negctrls)`.
+
+A controlled `gphase(θ)` is the special case `V = I`, `α = θ`. Therefore, after
+negative-control normalization, a single active control gives exactly `P(θ)` on
+that control wire, while two or more active controls give exactly
+`E_θ(activeControls)` on the ordered active-control register. Mixed
+positive/negative-control forms use the same `X`-conjugation rule above.
 
 **Rule:** When constructing a controlled gate, preserve the base gate's global
 phase exactly on the enabled control subspace. For one positive control, this is
@@ -833,10 +853,13 @@ Canonical phase representation:
   solely by this field.
 - `globalPhaseGate(theta)` adds to the owning scope's scalar; in the normalized
   in-memory representation a foldable **bare, unmodified** zero-qubit phase is
-  not stored as an ordinary instruction. If a lower-level representation or
-  parser applies modifiers first, `inv @ gphase(theta)` and
-  `pow(k) @
-  gphase(theta)` may normalize to a bare phase and then follow the
+  not stored as an ordinary instruction. In the builder API this means
+  `globalPhaseGate(theta)` is reserved for phase expressions already valid at
+  the owning scope's entry under Section 2.6; declaration-dependent or otherwise
+  non-hoistable programmatic zero-qubit phases remain ordinary instructions or
+  are rejected by APIs that expose only the canonical scalar. If a lower-level
+  representation or parser applies modifiers first, `inv @ gphase(theta)` and
+  `pow(k) @ gphase(theta)` may normalize to a bare phase and then follow the
   same foldability rule from Section 2.6.
 - When parsing OpenQASM 3, fold only foldable bare, unmodified, unannotated
   `gphase(theta);` statements encountered in a given scope into that scope's
@@ -2121,13 +2144,16 @@ parameters accept `AngleExpr`.
 
 A bare `qc.globalPhaseGate(theta)` normalizes directly into the circuit's
 `globalPhase` expression rather than being stored as an ordinary instruction.
-This builder API denotes canonical foldable scope-global phase. Deserialized
-OpenQASM bare `gphase(theta)` that is non-hoistable, or simply not foldable
-under Section 2.6 because it is not in canonical leading position, must instead
-remain an ordinary zero-qubit instruction. A control-bearing form such as
-`ctrl @ gphase(theta)` is not scope-global and must be represented as an
-instruction (or desugared to the exact enabled-subspace phase operator) rather
-than absorbed into `globalPhase`.
+This builder API denotes canonical foldable scope-global phase, so `theta` must
+already be valid at the owning scope's entry under Section 2.6. A
+declaration-dependent or otherwise non-hoistable programmatic zero-qubit phase
+must instead remain an ordinary instruction, or be rejected by APIs that expose
+only canonical scope-global phase. Deserialized OpenQASM bare `gphase(theta)`
+that is non-hoistable, or simply not foldable under Section 2.6 because it is
+not in canonical leading position, must instead remain an ordinary zero-qubit
+instruction. A control-bearing form such as `ctrl @ gphase(theta)` is not
+scope-global and must be represented as an instruction (or desugared to the
+exact enabled-subspace phase operator) rather than absorbed into `globalPhase`.
 
 **Single-Qubit Gates:**
 
