@@ -272,14 +272,13 @@ parameter or uses another phase-exact lowering.
 
 The same exact-spelling distinction applies to the standard-library textual
 rotation gates. Textual OpenQASM 3 `rx(θ)`, `ry(θ)`, and `rz(θ)` denote
-`exp(-i*θ*X)`, `exp(-i*θ*Y)`, and `exp(-i*θ*Z)` respectively, while this
-library's internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` use the negative-exponent
-half-angle convention from Section 2.2. Therefore exact parsing or
-canonicalization must map textual `rx(θ)` to internal `RX(2θ)`, textual `ry(θ)`
-to internal `RY(2θ)`, and textual `rz(θ)` to internal `RZ(2θ)`. Exact emission
-of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those same-name textual spellings
-must halve the angle. The standard-library controlled forms `crx`, `cry`, and
-`crz` inherit the same factor-of-two rule.
+`exp(-i*θ*X/2)`, `exp(-i*θ*Y/2)`, and `exp(-i*θ*Z/2)` respectively, matching
+this library's internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` exactly under the
+negative-exponent half-angle convention from Section 2.2. Therefore exact
+parsing or canonicalization must preserve the same angle parameter, and exact
+emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those same-name textual
+spellings must emit the same angle. The standard-library controlled forms `crx`,
+`cry`, and `crz` inherit that same angle-preserving rule.
 
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
@@ -313,6 +312,14 @@ Here and throughout this section, `wrapToPi(x)` means normalization to
   `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
   `δ = wrapToPi(arg(-V[0][1]) - arg(V[0][0]))`, so the generic branch returns
   `β, δ ∈ (-π, π]`.
+- If the generic branch above is taken in a numeric implementation, perform a
+  deterministic boundary-repair step before final acceptance: if `γ <= ε_ZYZ`,
+  also form the diagonal structural tuple using the `γ = 0` rule below; if
+  `π - γ <= ε_ZYZ`, also form the anti-diagonal structural tuple using the
+  `γ = π` rule below. If such a structural tuple recomposes to `M` within the
+  library comparison epsilon, prefer that structural tuple over the provisional
+  generic one. This repair step is only a boundary canonicalization rule; it
+  does not replace the primary structural entry-magnitude tests above.
 - If the `γ = 0` structural branch above is taken, `V` is diagonal. Exactness
   depends on the individual diagonal-entry phase, not only on their ratio. Let
   `ζ = arg(V[1][1]) ∈ (-π, π]`, and set `β = ζ`, `δ = ζ`, so
@@ -339,13 +346,23 @@ Library API compatibility aliases: `U1(λ) = P(λ)` exactly. `U2(φ,λ)` and
 `U3(θ,φ,λ)` are legacy convenience names in this library with exact matrices
 `U(π/2, φ, λ)` and `U(θ,φ,λ)` respectively. These are API-level aliases under
 this document's phase convention; they are **not** by themselves a claim that
-the textual OpenQASM 3 compatibility spellings `u2` / `u3` may always be
-emitted, parsed, or round-tripped as simple phase-free synonyms. For exact
-OpenQASM 3 round-tripping, preserve the selected standard-library semantics of
-textual `u1` / `u2` / `u3`; if that requires an explicit compensating
-`gphase(...)`, `globalPhase`, or conversion through textual OpenQASM 3 `U` with
-exact compensation, carry it explicitly rather than silently collapsing it into
-a neighboring same-name library gate.
+the textual OpenQASM 3 compatibility spellings `u1` / `u2` / `u3` are always
+phase-free synonyms. The exact textual relations are:
+
+```
+u1_OpenQASM3(λ) = U1(λ) = P(λ)
+u2_OpenQASM3(φ, λ) = exp(-i*(φ+λ)/2) * U2(φ, λ) = RZ(φ) * RY(π/2) * RZ(λ)
+u3_OpenQASM3(θ, φ, λ) = exp(-i*(φ+λ)/2) * U3(θ, φ, λ) = RZ(φ) * RY(θ) * RZ(λ)
+```
+
+Therefore exact parsing of textual `u2` / `u3` into the library's internal `U2`
+/ `U3` must record the extracted phase `-(φ+λ)/2` explicitly in the same
+semantic scope. Exact emission of internal `U2` / `U3` as those textual
+spellings must add compensating `gphase((φ+λ)/2)` in the same scope, or use any
+other phase-exact lowering. As with textual `U`, if the occurrence is controlled
+or otherwise non-hoistable, preserve that phase locally on the enabled subspace
+instead of hoisting it, and never silently collapse it into a neighboring
+same-name library gate.
 
 #### 6. Global Phase Tracking
 
@@ -673,10 +690,10 @@ compatibility aliases such as `u1`, `u2`, and `u3` must likewise be handled
 phase- and angle-exactly according to the selected standard library, not by
 assuming they are identical to similarly named library API gates. A serializer
 may lower same-name textual rotations through internal `RX` / `RY` / `RZ` with
-the exact factor-of-two angle conversion from Section 2.5, may lower
-compatibility spellings to phase-exact `p` / `U` plus explicit `gphase(...)`
-compensation, and may lower textual `cu` to a phase-exact `ctrl @ U` form plus
-exact enabled-subspace phase compensation, instead of emitting those spellings
+the exact same angle parameter from Section 2.5, may lower compatibility
+spellings to phase-exact `p` / `U` plus explicit `gphase(...)` compensation, and
+may lower textual `cu` to a phase-exact `ctrl @ U` form plus exact
+enabled-subspace phase compensation, instead of emitting those spellings
 directly. A deserializer may likewise canonicalize any of these into internal
 `P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit `globalPhase` or statement-level
 `gphase` so long as exact phase-aware semantics are preserved.
@@ -1310,12 +1327,13 @@ return identity.
 
 OpenQASM 3 note: textual standard-library spellings such as `rx`, `ry`, `rz`,
 `u2`, `u3`, and `cu` must be serialized/deserialized phase-exactly and may
-require explicit `gphase` compensation or angle rescaling instead of simple
-name-preserving round-trip. In particular, textual `rx(θ)`, `ry(θ)`, and `rz(θ)`
-correspond exactly to internal `RX(2θ)`, `RY(2θ)`, and `RZ(2θ)` under this
-document's half-angle convention, and `crx` / `cry` / `crz` inherit the same
-doubling rule. The formulas above use the library's internal `U`, `RX`, `RY`,
-and `RZ`, not the textual OpenQASM 3 built-ins of the same spellings.
+require explicit `gphase` compensation or other phase-aware lowering instead of
+simple name-preserving round-trip. In particular, textual `rx(θ)`, `ry(θ)`, and
+`rz(θ)` correspond exactly to internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` under this
+document's half-angle convention, and `crx` / `cry` / `crz` preserve the same
+angle. By contrast, textual `U`, `cu`, `u2`, and `u3` may still require explicit
+`gphase` compensation. The formulas above use the library's internal `U`, `RX`,
+`RY`, and `RZ`, not the textual OpenQASM 3 built-ins of the same spellings.
 
 ---
 
@@ -2328,9 +2346,9 @@ zero qubits and the desired `AngleExpr` parameter.
 `u2` / `u3` are programmatic compatibility helpers under this document's phase
 convention. Exact OpenQASM 3 serialization may lower them to `u` plus explicit
 phase compensation rather than preserving the same helper spelling. The internal
-`rx` / `ry` / `rz` builder methods use this document's half-angle rotation
-convention; exact textual OpenQASM 3 `rx` / `ry` / `rz` spellings therefore use
-half the internal parameter on emission and double it on parse.
+`rx` / `ry` / `rz` builder methods already match textual OpenQASM 3 `rx` / `ry`
+/ `rz` angle-for-angle; by contrast, textual `U`, `cu`, `u2`, and `u3` may
+require explicit phase compensation on serialization/deserialization.
 
 **Two-Qubit Gates:**
 
@@ -2363,8 +2381,9 @@ half the internal parameter on emission and double it on parse.
 `cu1` / `cu3` are likewise programmatic compatibility helpers. Exact OpenQASM 3
 serialization may lower them to `cp`, `cu`, and explicit phase-preserving
 transformations instead of preserving those helper names. Likewise, exact
-textual OpenQASM 3 `crx` / `cry` / `crz` spellings must rescale angles by the
-same factor-of-two rule as their single-qubit `rx` / `ry` / `rz` counterparts.
+textual OpenQASM 3 `crx` / `cry` / `crz` spellings preserve the same angle as
+their internal counterparts; only textual `U` / `cu` / `u2` / `u3` require the
+additional phase-aware conversions from Section 2.5.
 
 **Three-Qubit Gates:**
 
@@ -3022,6 +3041,19 @@ for (alpha, V) in [
     gamma = clamp(2 * arccos(|v00|), 0, pi)
     beta  = wrapToPi(phase(v10) - phase(v00))
     delta = wrapToPi(phase(-v01) - phase(v00))
+    // Boundary repair for near-diagonal / near-anti-diagonal floating-point inputs.
+    if gamma <= zyzBranchEps:
+      zetaDiag = phase(v11)
+      if exp(i*alpha) * Rz(zetaDiag) * Ry(0) * Rz(zetaDiag) equals M:
+        gamma = 0
+        beta  = zetaDiag
+        delta = zetaDiag
+    else if pi - gamma <= zyzBranchEps:
+      zetaAnti = phase(v10)
+      if exp(i*alpha) * Rz(zetaAnti) * Ry(pi) * Rz(-zetaAnti) equals M:
+        gamma = pi
+        beta  = zetaAnti
+        delta = -zetaAnti
   if exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta) equals M:
     return {alpha, beta, gamma, delta}   // returned alpha ∈ (-pi, pi]
 error("exact ZYZ lift selection failed")
@@ -3032,9 +3064,12 @@ tolerance for numeric implementations, not the library-wide equality epsilon.
 Exact or symbolic implementations should use exact diagonal / anti-diagonal
 structure when available. Implementations must not decide those branches solely
 from the `arccos`-derived `gamma`, because floating-point roundoff near `0` or
-`pi` can make that test numerically unstable. The returned `alpha` is not fixed
-by the determinant alone: the primary candidate `alpha0` is preferred whenever
-it exactly recomposes `M`, otherwise the shifted candidate `wrapToPi(alpha0+pi)`
+`pi` can make that test numerically unstable. When the generic formulas land
+within `zyzBranchEps` of either boundary, numeric implementations must also try
+the corresponding structural tuple and prefer it if that tuple recomposes within
+the library comparison epsilon. The returned `alpha` is not fixed by the
+determinant alone: the primary candidate `alpha0` is preferred whenever it
+exactly recomposes `M`, otherwise the shifted candidate `wrapToPi(alpha0+pi)`
 supplies the missing `SU(2)` sign bit needed for exact equality.
 
 These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
@@ -3169,7 +3204,10 @@ e) Iterate until no more reductions or max iterations reached.
   structure when available or else the dedicated `zyzBranchEps = 1e-12`, not
   solely from the `arccos`-derived `gamma`, including exact boundary cases such
   as `-I`, `-RY(pi)`, `exp(i*3*pi/4) * RY(pi/4)`, and floating-point diagonal /
-  anti-diagonal inputs.
+  anti-diagonal inputs; when a provisional generic solution lands within
+  `zyzBranchEps` of `0` or `pi`, verify the implementation also tries the
+  corresponding structural tuple and prefers it whenever that tuple recomposes
+  within the comparison epsilon.
 - **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose
   using the returned `globalPhase` -> verify exact equality with the original
   matrix.
@@ -4259,21 +4297,23 @@ Must handle all features listed above:
   reserializes without silent phase loss; canonicalization to the library's
   internal `U` must preserve the extracted `theta/2` phase explicitly.
 - Verify textual OpenQASM 3 standard-library `rx(theta)`, `ry(theta)`, and
-  `rz(theta)` parse and reserialize without factor-of-two errors; exact
-  canonicalization to internal `RX`, `RY`, and `RZ` must double the stored
-  angle, and exact emission back to those same-name textual spellings must halve
-  it again.
+  `rz(theta)` parse and reserialize without angle or phase drift; exact
+  canonicalization to internal `RX`, `RY`, and `RZ` must preserve the same
+  stored angle, and exact emission back to those same-name textual spellings
+  must preserve it again.
 - Verify textual OpenQASM 3 standard-library `crx(theta)`, `cry(theta)`, and
-  `crz(theta)` round-trip with the same factor-of-two rule on their angles and
-  without changing the enabled-subspace phase behavior.
+  `crz(theta)` round-trip with the same angle on their parameters and without
+  changing the enabled-subspace phase behavior.
 - Verify textual OpenQASM 3 `cu(theta, phi, lambda, gamma)` parses and
   reserializes without silent phase loss; conversion to the library's internal
   `CU` must add `theta/2` to the stored fourth parameter, and exact emission
   back to textual `cu` must subtract it again or use another phase-exact
   lowering.
 - Verify OpenQASM compatibility `u2` / `u3` parse and reserialize without silent
-  phase loss; exact round-trip may use textual `U` plus explicit `gphase(...)`
-  instead of re-emitting the same compatibility spelling.
+  phase loss; conversion to the library's internal `U2` / `U3` must preserve the
+  extracted `-(phi+lambda)/2` phase explicitly, and exact round-trip may use
+  textual `U` plus explicit `gphase(...)` instead of re-emitting the same
+  compatibility spelling.
 - Control flow: serialize/deserialize `if_test` with true and false body.
 - Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
