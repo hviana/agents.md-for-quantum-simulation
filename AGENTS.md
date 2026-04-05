@@ -115,7 +115,15 @@ explicitly:
   operator or state. Such checks must be called out by name (e.g.,
   `equalsUpToGlobalPhase`) and must never be the default comparison path.
   Matching measurement distributions alone is a weaker property and does not
-  prove operator equality up to global phase.
+  prove operator equality up to global phase. For deterministic public behavior,
+  `equalsUpToGlobalPhase` on matrices and state vectors must define the zero
+  case explicitly: if both operands are numerically all-zero under the
+  comparison epsilon, return `true`; if exactly one operand is numerically
+  all-zero, return `false`. Otherwise derive one candidate phase from a
+  corresponding pivot entry/amplitude that is nonzero in both operands, and
+  require every entry/amplitude to match under that same phase within epsilon.
+  Implementations must not compare only magnitudes or allow entry-wise varying
+  phases.
 
 #### 2. Rotation Gates — Negative-Exponent Physics Convention
 
@@ -419,20 +427,24 @@ statement stream, preserving expression structure, annotations, and evaluation
 order. Modifier-bearing forms of `gphase`/`globalPhaseGate` are first normalized
 by modifier expansion. Chained modifiers in this section are applied
 right-to-left (innermost first), so `ctrl @ inv @ gphase(θ)` means control of
-`gphase(-θ)`: `inv @ gphase(θ)` becomes bare `gphase(-θ)`. `pow(k) @ gphase(θ)`
-follows the same exact matrix-power semantics as `pow(k)` on any other gate, so
-it may normalize to a bare `gphase(...)` only when that rewrite is exact. This
-is always true for integer `k`, giving bare `gphase(k*θ)`. For non-integer `k`,
-the normative 1×1 rule is principal scalar power: if the implementation can
-determine an exact principal representative `θp ∈ (-π, π]` such that
-`exp(i*θ) = exp(i*θp)`, then `pow(k) @ gphase(θ)` denotes bare `gphase(k*θp)`.
-If exact reduction to such a `θp` is not available, the implementation must keep
-the `pow(k)` form explicit or reject APIs that cannot represent it without loss.
-If the normalized result is then bare, unannotated, and foldable, it may fold
-into the owning scope's scalar. Any remaining control-bearing,
-annotation-bearing, or otherwise non-foldable forms are not scope-global: after
-control promotion they become relative-phase operators and must remain ordinary
-instructions (or equivalent desugared phase operators).
+`gphase(-θ)`: `inv @ gphase(θ)` becomes bare `gphase(-θ)`. Throughout this
+section, `pow(k)` uses exact matrix-power semantics: for integer `k`, repeated
+multiplication (or repeated inversion for negative integers); for non-integer
+real `k`, the principal matrix power, equivalently principal spectral power on
+each eigenvalue when an exact spectral decomposition is available. Under that
+rule, `pow(k) @ gphase(θ)` may normalize to a bare `gphase(...)` only when that
+rewrite is exact. This is always true for integer `k`, giving bare
+`gphase(k*θ)`. For non-integer `k`, the normative 1×1 rule is principal scalar
+power: if the implementation can determine an exact principal representative
+`θp ∈ (-π, π]` such that `exp(i*θ) = exp(i*θp)`, then `pow(k) @ gphase(θ)`
+denotes bare `gphase(k*θp)`. If exact reduction to such a `θp` is not available,
+the implementation must keep the `pow(k)` form explicit or reject APIs that
+cannot represent it without loss. If the normalized result is then bare,
+unannotated, and foldable, it may fold into the owning scope's scalar. Any
+remaining control-bearing, annotation-bearing, or otherwise non-foldable forms
+are not scope-global: after control promotion they become relative-phase
+operators and must remain ordinary instructions (or equivalent desugared phase
+operators).
 
 #### 7. Global-to-Relative Phase Promotion in Controlled Gates
 
@@ -527,35 +539,45 @@ measurement/collapse statistics, classical side effects, executable-statement
 ordering, and both scope-global and statement-level phase behavior exactly; they
 must not assume that one unitary exists for the whole scope. Whenever a
 decomposition extracts a factor `exp(i*α)` or `exp(i*η)`, that factor may be
-hoisted into the owning scope's `globalPhase` only when the lowered operator is
-applied unconditionally on the whole scope state. If the decomposed operator is
-being lowered only on an enabled control subspace (for example during
-`ctrl @`/`negctrl @` synthesis or inside a larger controlled template), the
-extracted phase is no longer scope-global and must instead be promoted locally
-according to Section 2.7. Transpilation must never hoist such a phase past its
-control condition:
+hoisted into the owning scope's `globalPhase` only when **both** of the
+following hold: the lowered operator is applied unconditionally on the whole
+scope state, and the resulting bare phase also satisfies the full Section 2.6
+hoistability/foldability rules for that scope (already valid at scope entry,
+dependent only on immutable bindings, and representable in canonical
+leading-phase position). If an extracted phase is unconditional but fails the
+Section 2.6 test, preserve it as an ordinary zero-qubit `gphase` instruction in
+valid evaluation order instead of folding it into the scope scalar. If the
+decomposed operator is being lowered only on an enabled control subspace (for
+example during `ctrl @`/`negctrl @` synthesis or inside a larger controlled
+template), the extracted phase is no longer scope-global and must instead be
+promoted locally according to Section 2.7. Transpilation must never hoist such a
+phase past its control condition:
 
 - **ZYZ decomposition:** Given a 2×2 unitary `M`, extract `α, β, γ, δ` such that
   `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`. Return the canonical ranges from
   Section 2.5. The phase `α` must be tracked explicitly in the returned
   decomposition and, when lowering an unconditional operator to instructions,
-  added to the owning scope's `globalPhase` expression (equivalently, emitted as
-  a canonical leading `globalPhaseGate(α)` that normalizes into that scalar).
-  When the decomposition is used under control, promote `α` on the enabled
-  control subspace per Section 2.7 instead of adding it to the enclosing scope's
-  scalar. In all cases it must not be discarded or silently hidden inside a
-  neighboring named gate.
+  added to the owning scope's `globalPhase` expression only if the resulting
+  bare phase passes the full Section 2.6 hoistability/foldability test
+  (equivalently, emitted as a canonical leading `globalPhaseGate(α)` that then
+  normalizes into that scalar). Otherwise preserve it as an ordinary zero-qubit
+  `gphase(α)` in valid order. When the decomposition is used under control,
+  promote `α` on the enabled control subspace per Section 2.7 instead of adding
+  it to the enclosing scope's scalar. In all cases it must not be discarded or
+  silently hidden inside a neighboring named gate.
 - **RZ+SX decomposition:** The decomposition
   `M = exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` inherits phase from the ZYZ
   form. Therefore `decomposeToRzSx` must return both the instruction sequence
   and the extra phase `η`. When lowered unconditionally, `η` may be emitted as
-  an explicit leading `globalPhaseGate(η)`; when lowered under control, it must
-  be promoted on the enabled control subspace rather than hoisted to the
-  surrounding scope. Since `SX` carries a global phase `exp(i*π/4)` relative to
-  `RX(π/2)`, the angle arithmetic and the returned `η` must account for the
-  accumulated `exp(i*π/2)` from the two `SX` gates. Verify by recomposing
-  `exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` and checking exact equality with
-  the original.
+  an explicit leading `globalPhaseGate(η)` only if it also satisfies the full
+  Section 2.6 hoistability/foldability rule in that scope; otherwise preserve it
+  as an ordinary zero-qubit `gphase(η)` in valid order. When lowered under
+  control, it must be promoted on the enabled control subspace rather than
+  hoisted to the surrounding scope. Since `SX` carries a global phase
+  `exp(i*π/4)` relative to `RX(π/2)`, the angle arithmetic and the returned `η`
+  must account for the accumulated `exp(i*π/2)` from the two `SX` gates. Verify
+  by recomposing `exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` and checking exact
+  equality with the original.
 - **KAK/Weyl two-qubit decomposition:** The decomposition result must carry an
   explicit global phase (for example, `globalPhase` alongside the instruction
   list, or a returned phase-bearing `QuantumCircuit`). The single-qubit gates
@@ -566,10 +588,13 @@ control condition:
   (e.g., `H` ≈ `RY(π/2) * RZ(π)` up to global phase), record the compensating
   global phase explicitly in the owning scope's `globalPhase` expression (or as
   a canonical leading `globalPhaseGate`) only when the substituted operator is
-  unconditional in that scope. Under control, preserve the same phase by local
-  enabled-subspace promotion per Section 2.7 instead of hoisting it outside the
-  control condition. Transpilation must not silently change the circuit's
-  unitary or rely on undocumented phase absorption into neighboring named gates.
+  unconditional in that scope **and** the compensating phase satisfies the full
+  Section 2.6 hoistability/foldability rule there. Otherwise preserve it as an
+  ordinary zero-qubit `gphase` in valid order. Under control, preserve the same
+  phase by local enabled-subspace promotion per Section 2.7 instead of hoisting
+  it outside the control condition. Transpilation must not silently change the
+  circuit's unitary or rely on undocumented phase absorption into neighboring
+  named gates.
 
 #### 10. Serialization Phase Preservation
 
