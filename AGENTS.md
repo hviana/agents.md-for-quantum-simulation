@@ -121,20 +121,22 @@ explicitly:
   comparison epsilon, return `true`; if exactly one operand is numerically
   all-zero, return `false`. Otherwise choose one deterministic common pivot
   position that is nonzero in both operands. In floating-point implementations,
-  choose the position maximizing `min(|a_i|, |b_i|)` and break ties by earliest
-  row-major/index order; exact or symbolic implementations that cannot compare
-  magnitudes exactly must instead choose the earliest row-major/index position
-  that is exact-nonzero in both operands. Derive one candidate phase from that
-  pivot and require every entry/amplitude to match under that same phase within
-  epsilon. Implementations must not compare only magnitudes or allow entry-wise
-  varying phases. For exact symbolic operands, the same semantic rule applies
-  with exact-zero and exact-entry matching instead of a floating comparison
-  epsilon. If an implementation cannot determine the required zero test,
-  canonical pivot, or common phase exactly for unresolved symbolic values, it
-  must either bind those values before comparison or expose the operation as a
-  numeric-only API. Public APIs must document which behavior they use and must
-  not silently degrade to a weaker comparison such as magnitude-only matching,
-  sampling-based checks, or independent per-entry phase cancellation.
+  restrict pivot candidates to positions satisfying `|a_i| > ε` and `|b_i| > ε`,
+  then choose the position maximizing `min(|a_i|, |b_i|)` and break ties by
+  earliest row-major/index order; exact or symbolic implementations that cannot
+  compare magnitudes exactly must instead choose the earliest row-major/index
+  position that is exact-nonzero in both operands. If no common nonzero position
+  exists, return `false`. Derive one candidate phase from that pivot and require
+  every entry/amplitude to match under that same phase within epsilon.
+  Implementations must not compare only magnitudes or allow entry-wise varying
+  phases. For exact symbolic operands, the same semantic rule applies with
+  exact-zero and exact-entry matching instead of a floating comparison epsilon.
+  If an implementation cannot determine the required zero test, canonical pivot,
+  or common phase exactly for unresolved symbolic values, it must either bind
+  those values before comparison or expose the operation as a numeric-only API.
+  Public APIs must document which behavior they use and must not silently
+  degrade to a weaker comparison such as magnitude-only matching, sampling-based
+  checks, or independent per-entry phase cancellation.
 
 #### 2. Rotation Gates — Negative-Exponent Physics Convention
 
@@ -290,25 +292,25 @@ internal `CU` as textual OpenQASM 3 `cu` subtracts `θ/2` from the stored fourth
 parameter or uses another phase-exact lowering.
 
 The same exact-spelling distinction applies to the standard-library textual
-rotation gates. In this specification, the normative OpenQASM 3 textual
-semantics for those same-name rotation spellings are the exact matrices below.
-If any external OpenQASM text, standard-library revision, or vendor
-documentation uses different prose, doubled-angle notation, or shorthand,
-implementations of this library must still target these matrices by explicit
-translation rather than by silently reinterpreting internal `RX` / `RY` / `RZ`.
-Under that adopted textual profile, the spellings match the library's internal
-half-angle rotation convention exactly:
+rotation gates. This specification adopts their official OpenQASM 3 semantics
+directly. Under those semantics, the textual parameter denotes the full
+generator angle, so the same-name textual spellings differ from the library's
+internal half-angle `RX` / `RY` / `RZ` gates by a factor of two in their angle
+parameterization:
 
-- `rx_OpenQASM3(θ) = [[cos(θ/2), -i*sin(θ/2)], [-i*sin(θ/2), cos(θ/2)]] = RX(θ)`
-- `ry_OpenQASM3(θ) = [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]] = RY(θ)`
-- `rz_OpenQASM3(θ) = [[exp(-i*θ/2), 0], [0, exp(i*θ/2)]] = RZ(θ)`
+- `rx_OpenQASM3(θ) = exp(-i*θ*X) = RX(2*θ)`
+- `ry_OpenQASM3(θ) = exp(-i*θ*Y) = RY(2*θ)`
+- `rz_OpenQASM3(θ) = exp(-i*θ*Z) = RZ(2*θ)`
 
-Accordingly, exact parsing or canonicalization must preserve the same angle
-parameter, and exact emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those
-same-name textual spellings must emit the same angle. The standard-library
-controlled forms `crx`, `cry`, and `crz` inherit that same angle-preserving,
-no-extra-compensation rule: each denotes identity on the control-0 subspace and
-the exact corresponding one-qubit operator on the control-1 subspace.
+Accordingly, exact parsing or canonicalization of textual `rx(θ)`, `ry(θ)`, or
+`rz(θ)` must map them to internal `RX(2*θ)`, `RY(2*θ)`, or `RZ(2*θ)`,
+respectively. Exact emission of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those
+same-name textual spellings must emit `rx(θ/2)`, `ry(θ/2)`, or `rz(θ/2)`. The
+standard-library controlled forms `crx`, `cry`, and `crz` inherit that same
+factor-of-two parameter translation and otherwise require no additional phase
+compensation: textual `crx(θ)`, `cry(θ)`, and `crz(θ)` denote identity on the
+control-0 subspace and internal `CRX(2*θ)`, `CRY(2*θ)`, and `CRZ(2*θ)` on the
+control-1 subspace.
 
 Worked exact-translation examples:
 
@@ -327,11 +329,12 @@ Worked exact-translation examples:
   `exp(-i*π/2) * H`. Exact emission of the internal alias `U2(0, π)` as textual
   `u2(0, π)` therefore needs compensating `gphase(π/2)` in the same scope, or
   another phase-exact lowering.
-- By contrast, the same-name textual rotations already have the exact same
-  matrices stated above and therefore require no compensation: internal `rz(θ)`
-  emits as textual `rz(θ)` with the same angle and parses back with the same
-  angle; it must not be rewritten as `p(θ)` plus any implicit hidden phase
-  fixup.
+- By contrast, the same-name textual rotations require only parameter rescaling,
+  not additional `gphase` compensation: textual `rz(θ)` equals internal
+  `RZ(2*θ)`, so internal `RZ(θ)` emits as textual `rz(θ/2)` and textual `rz(θ)`
+  parses to internal `RZ(2*θ)`; likewise for `rx` / `RX` and `ry` / `RY`. Their
+  controlled forms `crx` / `cry` / `crz` inherit the same factor-of-two
+  parameter translation and the same enabled-subspace semantics.
 
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
@@ -526,8 +529,9 @@ instruction-level `gphase`. The canonical programmatic route for such an
 explicit statement-level phase is the low-level append/raw-instruction API:
 append an operation named `gphase` with zero qubits and the desired `AngleExpr`,
 plus any modifiers or annotations that make it non-foldable. When
-circuits/scopes are composed, their global phases add. When a circuit/scope is
-inverted, its global phase is negated. `compose`, `toGate`, `toInstruction`,
+circuits/scopes are composed, their global phases add. When a unitary
+circuit/scope is inverted, its global phase is negated; APIs that expose
+inversion must reject non-unitary scopes. `compose`, `toGate`, `toInstruction`,
 gate-definition bodies, subroutine bodies, and QASM round-tripping must preserve
 this scalar exactly.
 
@@ -842,19 +846,18 @@ Textual OpenQASM 3 built-in `U`, standard-library rotations `rx` / `ry` / `rz`
 and their controlled forms `crx` / `cry` / `crz`, standard-library `cu`, and
 compatibility aliases such as `u1`, `u2`, and `u3` must likewise be handled
 phase- and angle-exactly according to the exact matrix relations fixed in
-Section 2.5 for this library's OpenQASM 3 profile, not by assuming they are
-identical to similarly named library API gates. If a concrete external profile
-uses different same-name rotation parameterization, the serializer/deserializer
-must translate explicitly at the format boundary rather than reinterpret the
-internal gates. A serializer may lower same-name textual rotations through
-internal `RX` / `RY` / `RZ` with the exact same angle parameter from Section
-2.5, may lower compatibility spellings to phase-exact `p` / `U` plus explicit
-`gphase(...)` compensation, and may lower textual `cu` to a phase-exact
-`ctrl @ U` form plus exact enabled-subspace phase compensation, instead of
-emitting those spellings directly. A deserializer may likewise canonicalize any
-of these into internal `P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit
-`globalPhase` or statement-level `gphase` so long as exact phase-aware semantics
-are preserved.
+Section 2.5, not by assuming they are identical to similarly named library API
+gates. In particular, textual `rx(θ)`, `ry(θ)`, `rz(θ)`, `crx(θ)`, `cry(θ)`, and
+`crz(θ)` carry half the internal angle and therefore canonicalize to internal
+`RX(2*θ)`, `RY(2*θ)`, `RZ(2*θ)`, `CRX(2*θ)`, `CRY(2*θ)`, and `CRZ(2*θ)`; exact
+emission back to those same-name textual spellings halves the internal angle
+again. A serializer may lower compatibility spellings to phase-exact `p` / `U`
+plus explicit `gphase(...)` compensation, and may lower textual `cu` to a
+phase-exact `ctrl @ U` form plus exact enabled-subspace phase compensation,
+instead of emitting those spellings directly. A deserializer may likewise
+canonicalize any of these into internal `P`, `RX`, `RY`, `RZ`, `U`, `CU`, and
+explicit `globalPhase` or statement-level `gphase` so long as exact phase-aware
+semantics are preserved.
 
 #### 11. Minimum Phase-Aware Test Matrix
 
@@ -877,8 +880,10 @@ following phase-sensitive cases:
   emission and extracted `π/4` on parse; verify textual `cu(π/2, 0, π, 0)`
   parses to internal `CU(π/2, 0, π, π/4)`; verify `u2` and `u3` apply the
   `-(φ+λ)/2` compensation; verify same-name textual `rx` / `ry` / `rz` and `crx`
-  / `cry` / `crz` preserve the exact matrices from Section 2.5 and the same
-  angle with no extra phase bookkeeping.
+  / `cry` / `crz` apply the exact factor-of-two angle translation from Section
+  2.5 with no extra phase bookkeeping, so parsing textual `rx(θ)` yields
+  internal `RX(2*θ)` and emitting internal `RX(θ)` yields textual `rx(θ/2)`, and
+  likewise for `Y` / `Z` and their controlled forms.
 - **ZYZ structural branches and lift choice:** include `I`, `-I`, a generic
   diagonal `SU(2)` case `diag(exp(-i*ζ), exp(i*ζ))`, a generic anti-diagonal
   `SU(2)` case `[[0, -exp(-i*ζ)], [exp(i*ζ), 0]]`, at least one generic
@@ -1538,12 +1543,12 @@ OpenQASM 3 note: textual standard-library spellings such as `rx`, `ry`, `rz`,
 `u2`, `u3`, and `cu` must be serialized/deserialized phase-exactly and may
 require explicit `gphase` compensation or other phase-aware lowering instead of
 simple name-preserving round-trip. In particular, textual `rx(θ)`, `ry(θ)`, and
-`rz(θ)` correspond exactly to internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` under the
-normative OpenQASM 3 profile fixed in Section 2.5, and `crx` / `cry` / `crz`
-preserve the same angle. By contrast, textual `U`, `cu`, `u2`, and `u3` may
-still require explicit `gphase` compensation. The formulas above use the
-library's internal `U`, `RX`, `RY`, and `RZ`, not the textual OpenQASM 3
-built-ins of the same spellings.
+`rz(θ)` correspond to internal `RX(2*θ)`, `RY(2*θ)`, and `RZ(2*θ)` under the
+official OpenQASM 3 semantics adopted in Section 2.5, and `crx` / `cry` / `crz`
+inherit that same factor-of-two parameter translation. By contrast, textual `U`,
+`cu`, `u2`, and `u3` require the separate phase-aware conversions from Section
+2.5. The formulas above use the library's internal `U`, `RX`, `RY`, and `RZ`,
+not the textual OpenQASM 3 built-ins of the same spellings.
 
 ---
 
@@ -2598,10 +2603,10 @@ serialization/deserialization.
 `cu1` / `cu3` are likewise programmatic compatibility helpers. Exact OpenQASM 3
 serialization may lower them to `cp`, `cu`, and explicit phase-preserving
 transformations instead of preserving those helper names. Likewise, exact
-textual OpenQASM 3 `crx` / `cry` / `crz` spellings preserve the same angle as
-their internal counterparts under the Section 2.5 OpenQASM profile; only textual
-`U` / `cu` / `u2` / `u3` require the additional phase-aware conversions from
-Section 2.5.
+textual OpenQASM 3 `crx` / `cry` / `crz` spellings use half the internal angle
+under Section 2.5 and therefore serialize/deserialize with the same
+factor-of-two parameter translation as `rx` / `ry` / `rz`; textual `U` / `cu` /
+`u2` / `u3` add the separate phase-aware conversions from Section 2.5.
 
 **Three-Qubit Gates:**
 
@@ -4143,12 +4148,15 @@ must treat textual OpenQASM 3 built-in `U`, standard-library rotations `rx`,
 `ry`, `rz` and their controlled forms `crx`, `cry`, `crz`, standard-library
 `cu`, and compatibility spellings such as `u1`, `u2`, and `u3` phase- and
 angle-exactly using the exact matrix relations fixed in Section 2.5 for this
-library's OpenQASM 3 profile. If some external profile uses different same-name
-rotation parameterization, this serializer must translate explicitly at the
-format boundary rather than assuming those spellings are simple synonyms for
-same-name library API gates. It may canonicalize them to internal `P`, `RX`,
-`RY`, `RZ`, `U`, `CU`, and explicit leading or statement-level `gphase(...)`
-instead of assuming they are simple synonyms for same-name library API gates.
+library. In particular, textual `rx` / `ry` / `rz` and `crx` / `cry` / `crz`
+require the factor-of-two parameter translation from Section 2.5, while textual
+`U`, `cu`, `u2`, and `u3` also require the stated explicit phase extraction or
+compensation. If some external profile uses different same-name rotation
+parameterization, this serializer must translate explicitly at the format
+boundary rather than assuming those spellings are simple synonyms for same-name
+library API gates. It may canonicalize them to internal `P`, `RX`, `RY`, `RZ`,
+`U`, `CU`, and explicit leading or statement-level `gphase(...)` instead of
+assuming they are simple synonyms for same-name library API gates.
 
 **`serialize(circuit) -> string`**
 
@@ -4523,12 +4531,13 @@ Must handle all features listed above:
   internal `U` must preserve the extracted `theta/2` phase explicitly.
 - Verify textual OpenQASM 3 standard-library `rx(theta)`, `ry(theta)`, and
   `rz(theta)` parse and reserialize without angle or phase drift; exact
-  canonicalization to internal `RX`, `RY`, and `RZ` must preserve the same
-  stored angle, and exact emission back to those same-name textual spellings
-  must preserve it again.
+  canonicalization to internal `RX`, `RY`, and `RZ` must multiply the textual
+  angle by `2`, and exact emission back to those same-name textual spellings
+  must divide the internal angle by `2` again.
 - Verify textual OpenQASM 3 standard-library `crx(theta)`, `cry(theta)`, and
-  `crz(theta)` round-trip with the same angle on their parameters and without
-  changing the enabled-subspace phase behavior.
+  `crz(theta)` round-trip with the same textual angle on their parameters and
+  without changing the enabled-subspace phase behavior; exact internal
+  canonicalization uses `CRX(2*theta)`, `CRY(2*theta)`, and `CRZ(2*theta)`.
 - Verify textual OpenQASM 3 `cu(theta, phi, lambda, gamma)` parses and
   reserializes without silent phase loss; conversion to the library's internal
   `CU` must add `theta/2` to the stored fourth parameter, and exact emission
