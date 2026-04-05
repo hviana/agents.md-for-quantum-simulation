@@ -93,17 +93,22 @@ Within this section, plain multiplication/juxtaposition (for example,
 first. The arrow notation `A → B → C` denotes circuit-time order, so the total
 unitary is `C * B * A`.
 
-#### 1. Physical Equivalence vs. Exact Equality
+#### 1. Physical Equivalence vs. Phase-Sensitive Equality
 
 Quantum states are defined up to global phase: two states `|ψ⟩` and `e^(i*φ)|ψ⟩`
 are physically indistinguishable, and two operators `U` and `e^(i*φ)*U` produce
 identical measurement statistics. However, this library tracks global phase
 explicitly:
 
-- **Exact comparisons** (`Complex.equals`, `Matrix.equals`, state-vector
-  assertions) must match every matrix element and every amplitude including
-  global phase factors. They must **not** silently discard or normalize away
-  global phase.
+- **Default/direct equality checks** (`Complex.equals`, `Matrix.equals`,
+  state-vector assertions) compare corresponding entries or amplitudes directly.
+  For matrices and state vectors this means they are **phase-sensitive**: two
+  values that differ by a uniform scalar `e^(i*φ)` are different unless a
+  dedicated physical-equivalence API is requested. In floating-point
+  implementations these checks use the configured epsilon (default `1e-10`);
+  "exact" elsewhere in this document means "no implicit up-to-global-phase
+  normalization," not bitwise identity. They must **not** silently discard or
+  normalize away global phase.
 - **Physical-equivalence checks** (used only when explicitly requested, e.g.,
   comparing two operators or state vectors up to global phase after
   transpilation) may ignore a uniform scalar `e^(i*φ)` multiplying the entire
@@ -228,8 +233,9 @@ For deterministic exact ZYZ decomposition of
 - `β, δ ∈ [-π, π]`
 - `α` is fixed by the principal half-argument of the determinant:
   `α = wrapToPi(arg(det(M)) / 2)`, where `arg` returns the principal phase in
-  `(-π, π]`. Equivalently, choose the unique representative `α ∈ (-π/2, π/2]`
-  compatible with `det(M) = exp(2iα)`.
+  `(-π, π]` and maps the negative real axis to `π` rather than `-π`.
+  Equivalently, choose the unique representative `α ∈ (-π/2, π/2]` compatible
+  with `det(M) = exp(2iα)`.
 - If `0 < γ < π`, compute `β` and `δ` with `wrapToPi`, so the generic branch
   returns `β, δ ∈ (-π, π]`.
 - If `γ = 0` within epsilon, let `V = exp(-i*α) * M`, which is diagonal.
@@ -551,7 +557,28 @@ ClassicalBitRef {
   flatIndex: number           // Derived absolute classical-bit index
 }
 
-AngleExpr = number | Param    // Exact angle/phase expression; minimum support is numeric literals and Param, and implementations may widen this to a richer exact expression tree for parsed OpenQASM 3 expressions
+AngleExpr = number | Param | AngleConstant | AngleUnaryExpr | AngleBinaryExpr
+// Exact angle/phase expression tree used for gate parameters, scope
+// globalPhase, and statement-level gphase expressions. Minimum required support
+// is numeric literals, symbolic parameters, built-in constants, unary +/-,
+// and binary +, -, *, /. `number | Param` alone is not sufficient for this
+// specification because exact forms such as `pi/2`, `-theta`, and
+// `gamma + (phi + lambda)/2` must be representable and round-trippable.
+
+AngleConstant {
+  name: "pi" | "tau" | "euler"
+}
+
+AngleUnaryExpr {
+  op: "+" | "-"
+  expr: AngleExpr
+}
+
+AngleBinaryExpr {
+  op: "+" | "-" | "*" | "/"
+  left: AngleExpr
+  right: AngleExpr
+}
 
 Instruction {
   operation: string            // Gate/operation name (lowercase): "h", "cx", "gphase", "measure", etc.
@@ -848,9 +875,11 @@ return new instances (immutable).
 - `magnitude() -> number` — `|a+bi| = sqrt(a^2 + b^2)`
 - `magnitudeSquared() -> number` — `|a+bi|^2 = a^2 + b^2` (used in Born rule —
   avoid sqrt)
-- `phase() -> number` — `atan2(b, a)`
+- `phase() -> number` — principal argument in `(-pi, pi]`; implementations that
+  use `atan2(b, a)` internally must map `-pi` to `pi` on the negative real axis
+  so decomposition tie-break rules are deterministic
 - `neg() -> Complex` — `-(a+bi) = -a - bi`
-- `equals(other: Complex, epsilon?) -> boolean` — approximate equality
+- `equals(other: Complex, epsilon?) -> boolean` — direct approximate equality
 - `toString() -> string` — human-readable representation
 
 **Tests (minimum 40):**
@@ -860,6 +889,7 @@ return new instances (immutable).
 - Conjugate of real, imaginary, general complex.
 - Magnitude and magnitudeSquared for known values (3+4i -> 5, 25).
 - Phase for all four quadrants.
+- Phase on the negative real axis: `(-1 + 0i).phase() = pi` (not `-pi`).
 - `Complex.exp(0) = 1`, `Complex.exp(pi/2) = i`, `Complex.exp(pi) = -1`,
   `Complex.exp(3*pi/2) = -i`, `Complex.exp(2*pi) = 1`.
 - `Complex.fromPolar(1, 0) = 1`, `Complex.fromPolar(1, pi/2) = i`.
@@ -902,7 +932,8 @@ array of `Complex`. All methods return new instances.
 - `determinant() -> Complex` — determinant (at least for 2x2; general via LU or
   cofactor expansion for small matrices).
 - `equals(other: Matrix, epsilon?) -> boolean` — element-wise approximate
-  equality.
+  equality against corresponding entries; does not ignore a uniform global phase
+  factor.
 - `toString() -> string` — human-readable.
 - `rows` / `cols` — dimension accessors.
 
@@ -1908,32 +1939,32 @@ convention above.
 **File:** `src/parameter.{ext}`
 
 Implement a symbolic parameter system that allows circuit angles to be specified
-as either numeric literals or named parameters (possibly combined in
-expressions).
+as numeric literals, built-in constants, or named parameters (possibly combined
+in expressions).
 
 #### Param class
 
 - `Param(name: string)` — a named symbolic parameter.
 - Supports arithmetic: `Param + Param`, `Param * number`, `Param / number`,
   `number * Param`, `Param + number`, `Param - Param`, etc.
-- `bind(params: map<string, number>) -> number | Param` — substitutes known
-  values. If all symbols are resolved, returns a number. Otherwise returns a
-  partially-bound expression.
+- `bind(params: map<string, number>) -> AngleExpr` — substitutes known values.
+  If all symbols are resolved, returns a numeric literal. Otherwise returns a
+  partially-bound expression tree.
 - `isResolved() -> boolean` — true if the expression is a pure number.
 
 #### Expression types
 
 Support at minimum: `Add`, `Sub`, `Mul`, `Div`, `Neg`, `Literal(number)`,
-`Symbol(name)`.
+`Symbol(name)`, `BuiltinConstant(name ∈ {pi, tau, euler})`.
 
 The expression system must handle arbitrarily nested expressions like
-`"2 * theta + phi / 3"`.
+`"2 * theta + phi / 3"`, `"gamma + (phi + lambda) / 2"`, and `"pi / 2"`.
 
 Implementations may extend this expression tree with additional nodes such as
-function calls, named constants, casts, indexing/slicing, or other
-OpenQASM-3-specific forms as needed for full serializer/deserializer coverage.
-Bare `gphase(...)` and gate-angle expressions parsed from OpenQASM 3 must
-preserve that richer structure exactly until binding or evaluation.
+general function calls, casts, indexing/slicing, or other OpenQASM-3-specific
+forms as needed for full serializer/deserializer coverage. Bare `gphase(...)`
+and gate-angle expressions parsed from OpenQASM 3 must preserve that richer
+structure exactly until binding or evaluation.
 
 The same exact expression type is used for gate angles, scope `globalPhase`, and
 instruction-level `gphase(...)` expressions. Scope `globalPhase` stores only
@@ -1957,6 +1988,11 @@ complex scalar may require full binding first.
 - `isResolved()` returns false for unbound, true for bound.
 - Expression with no symbols is always resolved.
 - Verify that numeric literal angles pass through unchanged.
+- Built-in constants such as `pi`, `tau`, and `euler` are represented exactly in
+  the expression tree until evaluation/serialization policy chooses to fold
+  them.
+- Partial binding preserves exact structure for expressions such as
+  `gamma + (phi + lambda) / 2`.
 
 ---
 
@@ -2660,7 +2696,8 @@ U = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)
 ```
 
 Where, with `wrapToPi(x)` meaning normalization to `(-pi, pi]` and `phase`
-returning the principal argument in `(-pi, pi]`:
+returning the principal argument in `(-pi, pi]` (mapping `-pi` to `pi` on the
+negative real axis):
 
 ```
 Given U = [[a, b], [c, d]], det(U) = a*d - b*c = exp(2i*alpha):
