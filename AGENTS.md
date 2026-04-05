@@ -80,6 +80,375 @@ that the simulation engine is self-contained.
   the 4x4 matrix index has bit 1 = control, bit 0 = target. In a 3-qubit gate
   `G(ctrl1, ctrl2, target)`, bit 2 = ctrl1, bit 1 = ctrl2, bit 0 = target.
 
+### Phase Convention
+
+Use a single, explicit phase convention throughout the entire library. Every
+gate definition, decomposition, controlled-gate construction, transpilation
+pass, serializer, and simulator update must preserve this convention. The rules
+below are authoritative; if any gate matrix or decomposition elsewhere in this
+document appears to conflict, these rules take precedence.
+
+Within this section, plain multiplication/juxtaposition (for example,
+`A * B * C`) denotes standard matrix-product order, so the rightmost factor acts
+first. The arrow notation `A → B → C` denotes circuit-time order, so the total
+unitary is `C * B * A`.
+
+#### 1. Physical Equivalence vs. Exact Equality
+
+Quantum states are defined up to global phase: two states `|ψ⟩` and `e^(i*φ)|ψ⟩`
+are physically indistinguishable, and two operators `U` and `e^(i*φ)*U` produce
+identical measurement statistics. However, this library tracks global phase
+explicitly:
+
+- **Exact comparisons** (`Complex.equals`, `Matrix.equals`, state-vector
+  assertions) must match every matrix element and every amplitude including
+  global phase factors. They must **not** silently discard or normalize away
+  global phase.
+- **Physical-equivalence checks** (used only when explicitly requested, e.g.,
+  comparing two operators or state vectors up to global phase after
+  transpilation) may ignore a uniform scalar `e^(i*φ)` multiplying the entire
+  operator or state. Such checks must be called out by name (e.g.,
+  `equalsUpToGlobalPhase`) and must never be the default comparison path.
+  Matching measurement distributions alone is a weaker property and does not
+  prove operator equality up to global phase.
+
+#### 2. Rotation Gates — Negative-Exponent Physics Convention
+
+All Pauli rotation gates use the physics convention with a **negative sign** in
+the exponential:
+
+```
+R_P(θ) = exp(-i * θ * P / 2) = cos(θ/2) * I  -  i * sin(θ/2) * P
+```
+
+where `P ∈ {X, Y, Z}` is the Pauli generator. Concretely:
+
+- `RX(θ) = cos(θ/2)*I - i*sin(θ/2)*X`
+  `= [[cos(θ/2), -i*sin(θ/2)], [-i*sin(θ/2), cos(θ/2)]]`
+- `RY(θ) = cos(θ/2)*I - i*sin(θ/2)*Y`
+  `= [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]]`
+- `RZ(θ) = cos(θ/2)*I - i*sin(θ/2)*Z` `= [[exp(-i*θ/2), 0], [0, exp(i*θ/2)]]`
+
+The general rotation gate `R(θ, φ)` follows the same convention for an axis in
+the XY-plane:
+
+```
+R(θ, φ) = exp(-i * θ * (cos(φ)*X + sin(φ)*Y) / 2)
+```
+
+The arbitrary-axis rotation gate `RV(vx, vy, vz)` uses a **rotation vector**
+`v = (vx, vy, vz)`, not a unit axis. The direction of `v` is the rotation axis
+and the magnitude `|v| = sqrt(vx^2 + vy^2 + vz^2)` is the rotation angle:
+
+```
+RV(v) = exp(-i * (vx*X + vy*Y + vz*Z) / 2)
+```
+
+Equivalently, for a unit axis `n = (nx, ny, nz)` and an angle `θ`,
+`RV(θ*nx, θ*ny, θ*nz) = exp(-i * θ * (nx*X + ny*Y + nz*Z) / 2)`.
+
+**This convention must not be mixed with the positive-exponent convention**
+(`exp(+iθP/2)`) anywhere in the library. Every function that accepts a rotation
+angle `θ` interprets increasing `θ` as rotation in the same direction dictated
+by the negative exponent.
+
+#### 3. Phase Gate — Computational-Basis Convention
+
+The phase gate is defined in the computational basis as:
+
+```
+P(λ) = diag(1, exp(i*λ))  =  [[1, 0], [0, exp(i*λ)]]
+```
+
+It applies a phase `exp(i*λ)` to the `|1⟩` state and leaves `|0⟩` unchanged. The
+Clifford phase hierarchy descends from P:
+
+- `Z = P(π) = diag(1, -1)`
+- `S = P(π/2) = diag(1, i)`
+- `T = P(π/4) = diag(1, exp(i*π/4))`
+- `Sdg = P(-π/2) = S†`, `Tdg = P(-π/4) = T†`
+
+#### 4. Relationship Between RZ and P
+
+`RZ(θ)` and `P(θ)` differ by a global phase factor:
+
+```
+RZ(θ) = exp(-i*θ/2) * P(θ)
+```
+
+Equivalently, `P(θ) = exp(i*θ/2) * RZ(θ)`. Both produce identical measurement
+statistics for any `θ`, but they are **not** matrix-equal. Code must use the
+correct one: `RZ` when the negative-exponent rotation semantics are needed
+(e.g., inside decompositions that rely on `RZ` angle addition), and `P` when the
+computational-basis diagonal semantics are needed (e.g., controlled-phase gates,
+the `S`/`T` hierarchy). Never silently substitute one for the other.
+
+#### 5. General Single-Qubit Unitary — Canonical U Gate and ZYZ Decomposition
+
+The named three-parameter `U(θ, φ, λ)` gate is the standard representative of an
+arbitrary single-qubit unitary **up to global phase**:
+
+```
+U(θ, φ, λ) = exp(i*(φ+λ)/2) * RZ(φ) * RY(θ) * RZ(λ)
+```
+
+which produces the matrix:
+
+```
+[[cos(θ/2),              -exp(i*λ)*sin(θ/2)       ],
+ [exp(i*φ)*sin(θ/2),     exp(i*(φ+λ))*cos(θ/2)   ]]
+```
+
+An exact arbitrary single-qubit unitary `M ∈ U(2)` requires one additional phase
+parameter:
+
+```
+M = exp(i*α) * U(θ, φ, λ)
+```
+
+Equivalently,
+
+```
+M = exp(i*(α + (φ+λ)/2)) * RZ(φ) * RY(θ) * RZ(λ)
+```
+
+The factor `exp(i*(φ+λ)/2)` is the **global phase built into the named `U`
+gate**. It reconciles the RZ convention (which introduces `exp(∓iθ/2)` factors)
+with the U-gate convention. Under the canonical decomposition ranges defined
+below, this also makes the `[0][0]` entry `cos(θ/2)` real and nonnegative. This
+factor must be included whenever the named `U(θ, φ, λ)` gate is recomposed
+exactly. More generally, exact ZYZ recomposition of an arbitrary single-qubit
+unitary must also track the separate overall phase parameter `α`; omitting
+either contribution causes exact matrix comparisons to fail.
+
+For deterministic exact ZYZ decomposition of
+`M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
+
+- `γ ∈ [0, π]`
+- `β, δ ∈ [-π, π]`
+- `α` is fixed by the principal half-argument of the determinant:
+  `α = wrapToPi(arg(det(M)) / 2)`, where `arg` returns the principal phase in
+  `(-π, π]`. Equivalently, choose the unique representative `α ∈ (-π/2, π/2]`
+  compatible with `det(M) = exp(2iα)`.
+- If `0 < γ < π`, compute `β` and `δ` with `wrapToPi`, so the generic branch
+  returns `β, δ ∈ (-π, π]`.
+- If `γ = 0` within epsilon, let `V = exp(-i*α) * M`, which is diagonal.
+  Exactness depends on the individual diagonal-entry phase, not only on their
+  ratio. Let `ζ = arg(V[1][1]) ∈ (-π, π]`, and set `β = ζ`, `δ = ζ`, so
+  `RZ(β) * RZ(δ) = RZ(2ζ)` exactly. In particular, `V = -I` yields `β = δ = π`,
+  not `β = δ = 0`.
+- If `γ = π` within epsilon, let `V = exp(-i*α) * M`, which is anti-diagonal.
+  Exactness depends on the individual off-diagonal-entry phase, not only on the
+  phase ratio. Let `ζ = arg(V[1][0]) ∈ (-π, π]`, and set `β = ζ`, `δ = -ζ`. When
+  `ζ = π`, the canonical pair is `(β, δ) = (π, -π)`; this is why the closed
+  interval `[-π, π]` is required at the boundary.
+
+These normalization rules apply to decomposition/transpilation outputs so they
+are deterministic. User-facing gate constructors may accept any real angles and
+must preserve the exact matrix implied by the supplied inputs rather than
+silently renormalizing them.
+
+Aliases: `U1(λ) = P(λ)`, `U3(θ,φ,λ) = U(θ,φ,λ)`, `U2(φ,λ) = U(π/2, φ, λ)`.
+
+#### 6. Global Phase Tracking
+
+The library tracks an exact hoistable phase expression `globalPhase` on each
+phase-bearing scope: `QuantumCircuit`, custom gate definitions, subroutine
+definitions, and nested control-flow bodies. Its effect is to multiply every
+quantum amplitude exiting that scope by `exp(i * globalPhase)`. For a purely
+unitary scope this is equivalent to multiplying the scope unitary by that scalar
+after the body acts. For scopes that also contain measurement or classical
+control flow, the same scalar still multiplies every branch amplitude uniformly
+and therefore does not change measurement probabilities, collapse statistics, or
+branch predicates. It is still required for `getStateVector` correctness and for
+exact matrix/state comparisons on unitary subscopes. `globalPhase` is stored
+exactly as an angle expression, not only as a floating-point number. However, it
+stores only phase that is hoistable to the entry of the owning scope without
+changing semantics. A phase is hoistable only if it is unmodified, unannotated,
+and its expression depends only on symbols that are already in scope at that
+scope's entry and remain immutable throughout that scope. If unresolved symbols
+remain, any operation that needs a concrete complex scalar must bind them first.
+
+The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
+expressions may be reduced modulo `2π` only when that reduction is exact.
+Implementations are **not** required to prove that an arbitrary symbolic
+expression equals `0` or `2πk`; if they cannot prove that the scalar is exactly
+unity, they must preserve and serialize the stored expression. In this document,
+"normalized" hoistable global phase means "at most one leading bare scope-level
+`gphase(...)` per scope, emitted in the implementation's canonical `AngleExpr`
+form"; it does **not** require aggressive symbolic rewriting or inexact
+floating-point simplification.
+
+The `globalPhaseGate(θ)` operation increments the owning scope's global phase by
+`θ`, where `θ` may itself be symbolic. Its "matrix" is the 1×1 scalar
+`[[exp(i*θ)]]`. In the programmatic builder API, a bare unmodified
+`globalPhaseGate(θ)` denotes hoistable scope-global phase and is stored
+separately from the ordinary instruction stream rather than as a qubit
+instruction. When circuits/scopes are composed, their global phases add. When a
+circuit/scope is inverted, its global phase is negated. `compose`, `toGate`,
+`toInstruction`, gate-definition bodies, subroutine bodies, and QASM
+round-tripping must preserve this scalar exactly.
+
+A bare `gphase(θ);` parsed from OpenQASM 3 is folded into the owning scope's
+`globalPhase` only when it is hoistable by the rule above and no source-order
+information would be lost. Otherwise it remains an ordinary zero-qubit `gphase`
+instruction in the statement stream, preserving expression structure,
+annotations, and evaluation order. Modifier-bearing forms of
+`gphase`/`globalPhaseGate` are first normalized by modifier expansion:
+`inv @ gphase(θ)` becomes bare `gphase(-θ)` and `pow(k) @ gphase(θ)` becomes
+bare `gphase(k*θ)`. If the normalized result is then bare, unannotated, and
+hoistable, it may fold into the owning scope's scalar. Any remaining
+control-bearing, annotation-bearing, or otherwise non-hoistable forms are not
+scope-global: after control promotion they become relative-phase operators and
+must remain ordinary instructions (or equivalent desugared phase operators).
+
+#### 7. Global-to-Relative Phase Promotion in Controlled Gates
+
+A gate's global phase is unobservable in isolation, but it becomes a **relative
+phase** when the gate is applied only on an enabled control subspace. If
+`U = exp(i*α) * V` (where `V` has `det(V) = 1` or some other normalized form),
+then the controlled version of `U` is **not** the same as the controlled version
+of `V`: when the control condition is satisfied, the target sees
+`U = exp(i*α) * V`, and the `exp(i*α)` factor applies only to that enabled
+subspace.
+
+For the **single positive-control** case, the standard controlled-U construction
+handles this by applying `P(α)` to the control qubit:
+
+```
+Controlled-U(c, t) = C(t) → CX(c,t) → B(t) → CX(c,t) → A(t) → P(α)(c)
+```
+
+where `U = exp(i*α) * A * X * B * X * C` and `A * B * C = I`.
+
+Concrete examples of this promotion:
+
+- `SX = exp(i*π/4) * RX(π/2)`, so `CSX = P(π/4)(c) → CRX(π/2, c, t)`. The
+  `P(π/4)` on the control promotes the `exp(i*π/4)` global phase of SX into a
+  relative phase.
+- `SXdg = exp(-i*π/4) * RX(-π/2)`, so `CSXdg = P(-π/4)(c) → CRX(-π/2, c, t)`.
+- The `CU(θ,φ,λ,γ)` gate includes an explicit `γ` parameter for an additional
+  controlled global phase: `P(γ + (φ+λ)/2)` on the control.
+
+For **multiple positive controls**, the compensating phase must act only on the
+fully enabled control subspace. Implement it as the exact control-register phase
+operator that multiplies only `|11...1⟩` of the active positive-control wires by
+`exp(i*α)`; equivalently, use an exact multi-controlled phase synthesis on the
+controls themselves and then apply the controlled version of `V`. Applying
+`P(α)` to just one control wire is generally incorrect because it also phases
+partially enabled control states.
+
+For **negative controls**, conjugate each negative-control wire by `X` before
+and after both the enabled-subspace phase synthesis and the corresponding
+positive-control construction so that the promoted phase lands on the intended
+enabled subspace.
+
+**Rule:** When constructing a controlled gate, preserve the base gate's global
+phase exactly on the enabled control subspace. For one positive control, this is
+`P(α)` on the control. For multiple positive controls, use the exact
+fully-enabled-control phase operator on the active control register. For mixed
+positive/negative controls, first conjugate negative controls by `X`, apply that
+same exact enabled-subspace phase construction plus the controlled `V`, then
+undo the `X` conjugations. Omitting this compensation produces the wrong
+controlled unitary by changing relative phases.
+
+#### 8. Ising Interaction Gates
+
+The two-qubit Ising interaction gates follow the same negative-exponent
+convention applied to tensor-product Pauli generators:
+
+```
+RZZ(θ) = exp(-i * θ * Z⊗Z / 2) = diag(e^(-iθ/2), e^(iθ/2), e^(iθ/2), e^(-iθ/2))
+RXX(θ) = exp(-i * θ * X⊗X / 2)
+RYY(θ) = exp(-i * θ * Y⊗Y / 2)
+RZX(θ) = exp(-i * θ * Z⊗X / 2)
+```
+
+These are obtained by basis-change conjugation of `RZZ`:
+
+- `RXX(θ) = (H⊗H) · RZZ(θ) · (H⊗H)` because `H·Z·H = X`
+- `RYY(θ) = (RX(π/2)⊗RX(π/2)) · RZZ(θ) · (RX(-π/2)⊗RX(-π/2))` because
+  `RX(π/2)·Z·RX(-π/2) = -Y` and `(-Y)⊗(-Y) = Y⊗Y`
+- `RZX(θ) = (I⊗H) · RZZ(θ) · (I⊗H)` because `H·Z·H = X` on the second qubit
+
+The sign in the exponent must be consistent with the single-qubit rotation
+convention. Do not use `exp(+iθZ⊗Z/2)` for RZZ while using `exp(-iθZ/2)` for RZ.
+
+#### 9. Transpilation and Decomposition Phase Preservation
+
+All transpilation passes must preserve the exact phase-aware semantics of the
+circuit. For purely unitary inputs, that means preserving the total unitary
+including global phase. For circuits/scopes that contain measurement, reset, or
+classical control, passes must instead preserve branch behavior,
+measurement/collapse statistics, classical side effects, executable-statement
+ordering, and both scope-global and statement-level phase behavior exactly; they
+must not assume that one unitary exists for the whole scope:
+
+- **ZYZ decomposition:** Given a 2×2 unitary `M`, extract `α, β, γ, δ` such that
+  `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`. Return the canonical ranges from
+  Section 2.5. The phase `α` must be tracked explicitly in the returned
+  decomposition and, when lowering to instructions, added to the owning scope's
+  `globalPhase` expression (equivalently, emitted as a canonical leading
+  `globalPhaseGate(α)` that normalizes into that scalar) — not discarded or
+  silently hidden inside a neighboring named gate.
+- **RZ+SX decomposition:** The decomposition
+  `M = exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` inherits phase from the ZYZ
+  form. Therefore `decomposeToRzSx` must return both the instruction sequence
+  and the extra phase `η` (or emit an explicit leading `globalPhaseGate(η)`).
+  Since `SX` carries a global phase `exp(i*π/4)` relative to `RX(π/2)`, the
+  angle arithmetic and the returned `η` must account for the accumulated
+  `exp(i*π/2)` from the two `SX` gates. Verify by recomposing
+  `exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` and checking exact equality with
+  the original.
+- **KAK/Weyl two-qubit decomposition:** The decomposition result must carry an
+  explicit global phase (for example, `globalPhase` alongside the instruction
+  list, or a returned phase-bearing `QuantumCircuit`). The single-qubit gates
+  flanking the CX gates together with that returned phase must recompose the
+  original 4×4 matrix exactly (within epsilon). Do not drop the global phase of
+  the two-qubit unitary.
+- **Gate substitution:** When replacing one gate with an equivalent sequence
+  (e.g., `H` ≈ `RY(π/2) * RZ(π)` up to global phase), record the compensating
+  global phase explicitly in the owning scope's `globalPhase` expression (or as
+  a canonical leading `globalPhaseGate`). Transpilation must not silently change
+  the circuit's unitary or rely on undocumented phase absorption into
+  neighboring named gates.
+
+#### 10. Serialization Phase Preservation
+
+The OpenQASM 3 serializer must preserve both hoistable scope-global phase and
+statement-level `gphase` operations. A hoistable `globalPhase` is considered
+"nonzero" only when the implementation can prove that its scalar
+`exp(i * globalPhase)` is not exactly `1`. Exact constant folding and exact
+modulo-`2π` reduction of purely numeric literals are allowed; implementations
+are not required to prove that arbitrary symbolic expressions equal `2πk`, and
+if they cannot prove unity they must preserve and emit the stored expression.
+"Normalized" here means "emit at most one leading bare, unmodified, unannotated
+`gphase(θ);` per scope for the hoistable scalar, using the implementation's
+canonical stored `AngleExpr` form"; it does not require aggressive symbolic
+rewriting or inexact floating simplification. When a scope's hoistable
+`globalPhase` is nonzero, emit at most one normalized leading bare, unmodified,
+unannotated `gphase(θ);` for that scalar. For a braced scope, emit it
+immediately after that scope's opening brace. For the top-level program scope,
+emit it immediately after the `OPENQASM ...;` line and any required `include`
+directives, and before declarations or executable statements.
+
+The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
+in a scope. It may fold such a statement into that scope's scalar only when the
+statement is hoistable by Section 2.6. Otherwise preserve it as an ordinary
+zero-qubit instruction in source order, together with any attached annotations
+and exact expression structure. Modified or annotation-bearing forms such as
+`ctrl @ gphase(θ)`, `negctrl @ gphase(θ)`, or `@tag gphase(θ)` are not
+scope-global; they must be preserved as instructions (or equivalently desugared
+to exact enabled-subspace phase operators) and must not be folded into the scope
+scalar. `inv @ gphase(θ)` and `pow(k) @ gphase(θ)` are handled by modifier
+expansion first; only if the normalized result is still non-hoistable does it
+remain as an ordinary instruction. Round-tripping
+(`deserialize(serialize(circuit))`) must preserve exact phase-aware semantics.
+For purely unitary scopes, this means the same total unitary including global
+phase. For non-unitary scopes, it means the same declarations,
+executable-statement order, branch-local phase behavior, and evaluation order of
+any non-hoistable `gphase`.
+
 ---
 
 ## 3. Project Structure
@@ -182,12 +551,14 @@ ClassicalBitRef {
   flatIndex: number           // Derived absolute classical-bit index
 }
 
+AngleExpr = number | Param    // Exact angle/phase expression; minimum support is numeric literals and Param, and implementations may widen this to a richer exact expression tree for parsed OpenQASM 3 expressions
+
 Instruction {
-  operation: string            // Gate/operation name (lowercase): "h", "cx", "measure", etc.
+  operation: string            // Gate/operation name (lowercase): "h", "cx", "gphase", "measure", etc.
   qubits: number[]             // Qubit indices this operation acts on
   clbits: number[]             // Flat classical-bit indices in concatenated register order
   clbitRefs: ClassicalBitRef[] // Named classical-bit references aligned with clbits; empty when unused
-  params: (number | Param)[]   // Numeric or symbolic parameters (angles)
+  params: AngleExpr[]          // Numeric or symbolic angle/phase expressions
   condition?: Condition        // Classical condition (for if_test)
   label?: string               // Optional label for custom gates
   modifiers?: GateModifier[]   // Gate modifiers: ctrl @, negctrl @, inv @, pow(k) @
@@ -207,7 +578,7 @@ CircuitComplexity {
   totalOperations: number
   operationsByName: map<string, number>
   numParameters: number
-  globalPhase: number
+  globalPhase: AngleExpr
 }
 
 BlochCoordinates {
@@ -296,6 +667,7 @@ GateDefinition {
   params: string[]             // Parameter names (angle parameters)
   qubits: string[]             // Qubit argument names
   body: Instruction[]          // Gate body instructions
+  globalPhase: AngleExpr       // Accumulated phase for this gate body scope
 }
 
 GateModifier {
@@ -308,6 +680,7 @@ SubroutineDefinition {
   params: SubroutineParam[]    // Classical and quantum parameters
   returnType: ClassicalType | null  // null for void
   body: Instruction[]
+  globalPhase: AngleExpr       // Accumulated phase for this subroutine body scope
 }
 
 SubroutineParam {
@@ -337,9 +710,56 @@ Annotation {
 }
 ```
 
+The base `Instruction` record above describes the shared fields present on
+ordinary operations. Scoped/control-flow operations (`ifTest`, `forLoop`,
+`whileLoop`, `switch`, `box`) additionally carry nested `QuantumCircuit` body
+objects, or language-idiomatic tagged-union/subclass equivalents, rather than
+flattening those bodies into plain `Instruction[]`. This is required so every
+nested scope can own its own `globalPhase`, declarations, and classical-register
+metadata.
+
 The circuit model must preserve `ClassicalRegister[]` in declaration order. Flat
 classical-bit indices are a derived view obtained by concatenating those
 registers in order, then the bits within each register in ascending local index.
+
+Canonical phase representation:
+
+- `QuantumCircuit`, `GateDefinition`, and `SubroutineDefinition` each own a
+  scalar `globalPhase` expression (`AngleExpr`) separate from their ordered
+  `Instruction[]`. This scalar stores only hoistable scope-global phase
+  metadata; not every surface-syntax `gphase` statement is representable solely
+  by this field.
+- `globalPhaseGate(theta)` adds to the owning scope's scalar; in the normalized
+  in-memory representation a hoistable **bare, unmodified** zero-qubit phase is
+  not stored as an ordinary instruction. If a lower-level representation or
+  parser applies modifiers first, `inv @ gphase(theta)` and
+  `pow(k) @
+  gphase(theta)` may normalize to a bare phase and then follow the
+  same hoisting rule.
+- When parsing OpenQASM 3, fold only hoistable bare, unmodified, unannotated
+  `gphase(theta);` statements encountered in a given scope into that scope's
+  scalar by addition. A statement is hoistable only if its expression can be
+  moved to the scope entry without changing meaning: all referenced symbols are
+  already in scope there, remain immutable throughout the scope, and no
+  annotation or source-order information would be lost. Non-hoistable bare
+  `gphase` remains an ordinary zero-qubit instruction in source order.
+  Control-flow bodies are nested `QuantumCircuit` scopes, so branch-local phases
+  remain branch-local. Modifier-bearing forms such as `ctrl @ gphase(theta)`,
+  and annotated bare forms such as `@tag gphase(theta)`, are not scope-global
+  and must remain ordinary relative-phase instructions (or be desugared to
+  equivalent controlled-phase operations).
+- When serializing, emit at most one normalized leading bare `gphase(theta);`
+  per scope for the scalar `globalPhase`. Emit any remaining statement-level
+  bare `gphase` instructions in their original relative order. For braced
+  scopes, emit the scalar immediately after the opening brace and before the
+  rest of the body statements. For the top-level program scope, emit the scalar
+  immediately after the `OPENQASM` version line and any required `include`
+  directives, and before declarations or executable statements; because the
+  scalar is hoistable by construction, it must not depend on names declared
+  later in that scope. "Normalized" here means one leading hoistable
+  `gphase(theta);` per scope in the implementation's canonical stored
+  `AngleExpr` form; it does not require proving symbolic `2πk = 0` identities
+  beyond the exact simplifications the implementation already supports.
 
 Shot count is a **per-execution / per-submitted-job input**, not a backend
 capability field. Do not store it on `BackendConfiguration`; carry it in the
@@ -375,12 +795,15 @@ explicitly disableable.
 - Verify `ClassicalVariable` creation for each `ClassicalType` (bit, bool, int,
   uint, float, angle, complex, duration, stretch) with size, const, input, and
   output flags.
-- Verify `GateDefinition` creation with params and qubit args.
+- Verify `GateDefinition` creation with params, qubit args, and symbolic or
+  numeric `globalPhase`.
 - Verify `GateModifier` for each type: ctrl(n), negctrl(n), inv, pow(k).
 - Verify `SubroutineDefinition` and `ExternDeclaration` with params and return
-  type.
+  type, including symbolic or numeric `SubroutineDefinition.globalPhase`.
 - Verify `ArrayType` with base types and up to 7 dimensions.
 - Verify `Pragma` and `Annotation` creation.
+- Verify scoped control-flow instructions store nested `QuantumCircuit` bodies
+  so branch-local `globalPhase` is representable.
 - Verify shot count is modeled as a per-execution/per-job input rather than a
   `BackendConfiguration` field.
 - Verify TypeScript/JavaScript browser-runtime URL rewriting uses
@@ -586,7 +1009,7 @@ matrix. Together with CX, they form the universal alphabet.
 | `pauliY()`           | Y           | `[[0, -i], [i, 0]]`                                                                  |
 | `pauliZ()`           | Z           | `[[1, 0], [0, -1]]`                                                                  |
 | `pGate(lambda)`      | P(l)        | `[[1, 0], [0, exp(i*l)]]`                                                            |
-| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -e^(-i*ph)*sin(th/2)*i], [-e^(i*ph)*sin(th/2)*i, cos(th/2)]]`          |
+| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -i*e^(-i*ph)*sin(th/2)], [-i*e^(i*ph)*sin(th/2), cos(th/2)]]`          |
 | `rxGate(theta)`      | RX(th)      | `[[cos(th/2), -i*sin(th/2)], [-i*sin(th/2), cos(th/2)]]`                             |
 | `ryGate(theta)`      | RY(th)      | `[[cos(th/2), -sin(th/2)], [sin(th/2), cos(th/2)]]`                                  |
 | `rzGate(theta)`      | RZ(th)      | `[[exp(-i*th/2), 0], [0, exp(i*th/2)]]`                                              |
@@ -649,8 +1072,10 @@ Controlled-U(control, target) =
 ```
 
 **When control = 0:** CX does nothing, target sees `A * B * C = I`. ✓ **When
-control = 1:** CX applies X, target sees `A * X * B * X * C = U` (times phase
-from P(alpha) on control). ✓
+control = 1:** CX applies X, target sees
+`A * X * B * X * C = exp(-i*alpha) * U`, and `P(alpha)` on control contributes
+`exp(i*alpha)` when c=1, so the total action on the controlled subspace is
+exactly U. ✓
 
 Note on notation: decompositions are written in **circuit time order** (left to
 right). In standard matrix multiplication, the leftmost gate is applied first,
@@ -693,7 +1118,8 @@ CU(th,ph,l,gamma, c, t) =
     P(gamma + (ph+l)/2)(c)             // phase on control
 ```
 
-This construction is used by every Tier 2 controlled gate below.
+This single-positive-control construction is used by every Tier 2 controlled
+gate below.
 
 ---
 
@@ -728,8 +1154,8 @@ CP(lambda, c, t) =
 ```
 
 Proof: When c=0: `P(-l/2)*P(l/2) = I` on target, no phase on control. ✓ When
-c=1,t=1: `P(l/2)*X*P(-l/2)*X*P(l/2)` on target times `P(l/2)` on control =
-`exp(i*l)` total phase on |11⟩. ✓
+c=1,t=1: target sees `X*P(-l/2)*X*P(l/2)` (4 operations), and `P(l/2)` on
+control contributes `exp(i*l/2)`, for total `exp(i*l)` phase on |11⟩. ✓
 
 **CRZ — Controlled-RZ (2 CX)**
 
@@ -814,7 +1240,7 @@ B = Ry(-pi/4) * Rz(-pi/2)
 C = Rz(pi/2)
 
 CH(c, t) =
-    Rz(pi/2)(t) →                      // C = S(t)
+    Rz(pi/2)(t) →                      // C = Rz(pi/2)
     CX(c, t) →
     Rz(-pi/2)(t) → Ry(-pi/4)(t) →     // B (Rz first, then Ry in time order)
     CX(c, t) →
@@ -1168,10 +1594,13 @@ For `Cⁿ(U)` with N controls:
 - N=1: Use the Tier 2 controlled gate (CX, CRX, CRY, CRZ, CP).
 - N=2: Use the corresponding exact doubly-controlled `C²(U)` case. For `U = X`
   this is Tier 4 `CCX`; for a general 1-qubit `U`, apply the same Barenco/ABC
-  construction specialized to two controls.
+  construction specialized to two controls, including exact enabled-subspace
+  phase promotion for any extracted global phase.
 - N≥3: Apply the recursive scheme:
   `Cⁿ(U) = C(V)(cn,t) · Cⁿ⁻¹(X)(c1..cn-1,cn) · C(V†)(cn,t) · Cⁿ⁻¹(X)(c1..cn-1,cn) · Cⁿ⁻¹(V)(c1..cn-1,t)`
-  where V²=U.
+  where V²=U. If `U` or any recursively chosen root `V` carries a global phase
+  `exp(i*α)`, promote that phase exactly onto the currently active enabled
+  control subspace before continuing the recursion.
 
 For N controls, the resulting matrix is `2^(N+1) × 2^(N+1)`: identity everywhere
 except the last two rows/columns where the base gate's 2×2 matrix is applied.
@@ -1391,7 +1820,8 @@ convention above.
 - `uGate(pi/2, 0, pi) ~ hadamard()`.
 - `u1Gate(l) ~ pGate(l)` for several values.
 - `u3Gate(th,ph,l) ~ uGate(th,ph,l)` for several values.
-- `rxGate(pi) ~ -i*X` (up to global phase, verify action on states).
+- `rxGate(pi)` exactly equals `(-i) * X`; verify by exact matrix or exact
+  state-vector comparison, not only by measurement statistics.
 - `ryGate(pi)` applied to |0> gives |1>.
 - `sxGate() * sxGate() ~ pauliX()`.
 - `sxGate() * sxdgGate() ~ identityGate()`.
@@ -1463,7 +1893,7 @@ convention above.
   qubits. Verify unitarity.
 - Pauli string: `"X"` = pauliX, `"XY"` = X ⊗ Y, verify dimensions and elements.
   Verify tensor product construction.
-- RV gate: `rvGate(0,0,0) ~ I`, `rvGate(pi,0,0) ~ -i*X` (up to phase),
+- RV gate: `rvGate(0,0,0) = I` exactly, `rvGate(pi,0,0) = (-i) * X` exactly,
   unitarity.
 - Action of every single-qubit gate on |0> and |1> verified against expected
   output.
@@ -1499,6 +1929,20 @@ Support at minimum: `Add`, `Sub`, `Mul`, `Div`, `Neg`, `Literal(number)`,
 The expression system must handle arbitrarily nested expressions like
 `"2 * theta + phi / 3"`.
 
+Implementations may extend this expression tree with additional nodes such as
+function calls, named constants, casts, indexing/slicing, or other
+OpenQASM-3-specific forms as needed for full serializer/deserializer coverage.
+Bare `gphase(...)` and gate-angle expressions parsed from OpenQASM 3 must
+preserve that richer structure exactly until binding or evaluation.
+
+The same exact expression type is used for gate angles, scope `globalPhase`, and
+instruction-level `gphase(...)` expressions. Scope `globalPhase` stores only
+hoistable expressions as defined in Section 2.6; non-hoistable parsed
+`gphase(...)` keeps the same exact expression tree but remains an ordinary
+zero-qubit instruction. Serialization, binding, composition, and inversion must
+preserve these expressions symbolically; only operations that need a concrete
+complex scalar may require full binding first.
+
 **Tests (minimum 15):**
 
 - Create a Param, verify name.
@@ -1528,6 +1972,9 @@ Implement the `QuantumCircuit` class.
 QuantumCircuit(globalPhase = 0)
 ```
 
+`globalPhase` is an exact phase expression (`AngleExpr`), defaulting to the
+numeric zero.
+
 Qubits are allocated **implicitly**: when a gate references qubit index N, all
 qubits 0..N are automatically allocated if they do not yet exist.
 
@@ -1540,12 +1987,23 @@ still exists for serialization and backend result parsing.
 
 #### Gate Methods — ALL must be implemented
 
-Every gate method appends one Instruction to the circuit and returns `this` (for
-chaining). Angle parameters accept `number | Param`.
+Every gate method except a bare `globalPhaseGate` appends one Instruction to the
+circuit and returns `this` (for chaining). `globalPhaseGate` increments the
+circuit's scalar `globalPhase` and also returns `this`. Angle and phase
+parameters accept `AngleExpr`.
 
 **Global Phase:**
 
 - `qc.globalPhaseGate(theta)`
+
+A bare `qc.globalPhaseGate(theta)` normalizes directly into the circuit's
+`globalPhase` expression rather than being stored as an ordinary instruction.
+This builder API denotes hoistable scope-global phase. Deserialized OpenQASM
+bare `gphase(theta)` that is not hoistable under Section 2.6 must instead remain
+an ordinary zero-qubit instruction. A control-bearing form such as
+`ctrl @ gphase(theta)` is not scope-global and must be represented as an
+instruction (or desugared to the exact enabled-subspace phase operator) rather
+than absorbed into `globalPhase`.
 
 **Single-Qubit Gates:**
 
@@ -1736,16 +2194,19 @@ in classical expressions and control flow conditions.
 
 - `qc.compose(other, qubitMapping, clbitMapping)` — append another circuit's
   instructions into this one, mapped by indices. Adds `other`'s globalPhase.
-- `qc.toGate(label?)` — convert to reusable gate (unitary only).
-- `qc.toInstruction(label?)` — convert to reusable instruction.
+- `qc.toGate(label?)` — convert to reusable gate (unitary only), preserving its
+  exact globalPhase in the produced reusable definition/metadata.
+- `qc.toInstruction(label?)` — convert to reusable instruction, preserving the
+  exact globalPhase of the wrapped body.
 - `qc.append(operation, qubitIndices, clbitIndices)` — low-level append.
 - `qc.inverse()` — return new circuit with reversed, daggered gates. Negated
   global phase. Only unitary circuits.
 
-Low-level append, compose, inversion, and parameter binding must preserve the
-ordered `ClassicalRegister[]` metadata and every instruction's named classical
-bit references. Do **not** collapse multiple named registers into one anonymous
-bit array during any circuit transformation.
+Low-level append, compose, inversion, `toGate`, `toInstruction`, and parameter
+binding must preserve the ordered `ClassicalRegister[]` metadata, every
+instruction's named classical bit references, and every scope's exact
+`globalPhase` expression. Do **not** collapse multiple named registers into one
+anonymous bit array during any circuit transformation.
 
 **Informational:**
 
@@ -1785,10 +2246,26 @@ bit array during any circuit transformation.
 - Verify `inverse()` reverses and daggers gates.
 - Verify `compose()` maps qubits and clbits correctly and preserves/remaps
   classical-register structure in order.
-- Verify `toGate()` and `toInstruction()`.
-- Verify control flow instructions are stored correctly.
+- Verify `toGate()` and `toInstruction()` preserve exact `globalPhase`.
+- Verify control flow instructions are stored correctly, with nested
+  `QuantumCircuit` bodies preserving branch-local `globalPhase`.
 - Verify `barrier()` and `delay()` are stored but don't affect state.
-- Verify `globalPhaseGate()` is stored.
+- Verify `globalPhaseGate()` accumulates on the circuit's scalar `globalPhase`,
+  is not stored as an ordinary qubit instruction in the normalized
+  representation, and survives compose/inverse/serialization.
+- Verify symbolic `globalPhase` expressions survive bind/compose/inverse without
+  numeric coercion.
+- Verify deserialized hoistable bare `gphase` statements normalize into the
+  scope `globalPhase` only when safe to hoist.
+- Verify deserialized declaration-dependent, mutable-state-dependent, or
+  annotated bare `gphase` statements remain ordinary zero-qubit instructions in
+  source order rather than being folded into the scope `globalPhase`.
+- Verify `inv @ gphase(...)` and `pow(k) @ gphase(...)` normalize first and are
+  folded into the scope `globalPhase` only if the resulting bare phase is
+  hoistable.
+- Verify control-bearing `gphase` operations, and any `gphase` still non-bare or
+  non-hoistable after modifier expansion, are stored as ordinary instructions or
+  desugared relative-phase operations, not folded into the scope `globalPhase`.
 - Edge cases: circuit with 0 instructions, only measurements, only resets.
 - Qubit index validation for multi-qubit gates (no duplicate qubits).
 - Verify Pauli string gate with various strings.
@@ -1891,12 +2368,17 @@ This is the core simulation engine.
 2. Initialize classical memory to all zeros using the circuit's ordered named
    classical registers. Maintain both the ordered register layout and the
    derived flat classical-bit array (length `numClbits`).
-3. Apply the circuit's global phase at the end (multiply all amplitudes by
-   `exp(i * globalPhase)`).
+3. Record/defer the circuit's accumulated global phase; do not apply it during
+   gate evolution because it is unobservable until an exact state vector or
+   exact matrix/state comparison is needed.
 4. For each instruction in order: a. If it's a control flow operation
    (`if_test`, `for_loop`, `while_loop`, `switch`), handle accordingly (see
    below). b. Otherwise apply the gate/operation.
-5. After all instructions, sample measurement outcomes.
+5. After all instructions, apply the deferred global phase to the final state
+   vector (multiply all amplitudes by `exp(i * globalPhase)`) if an exact state
+   vector or exact state/unitary comparison is requested. It may remain deferred
+   for pure measurement sampling because it does not affect probabilities.
+6. After all instructions, sample measurement outcomes.
 
 **Gate Application — Subspace Iteration (MANDATORY):**
 
@@ -2009,8 +2491,8 @@ Percentages are computed from shot counts:
   first column.
 - Every single-qubit gate applied to |1>: verify `getStateVector` matches gate's
   second column.
-- Parameterized circuit: `RX(theta)` with `theta = pi` on |0> should give |1>
-  (up to global phase).
+- Parameterized circuit: `RX(theta)` with `theta = pi` on |0> should give the
+  exact state vector `[0, -i]`.
 - Y gate on |0>: verify state vector is [0, i].
 - RY(pi/2) on |0>: verify equal superposition.
 - Classical conditioning via `if_test`: measure qubit 0, conditionally apply X
@@ -2068,12 +2550,27 @@ also publicly exposed so users can invoke individual passes.
     diagonalization.
   - `ctrl(n) @ U` → build the (n+m)-qubit controlled-U gate matrix: identity on
     all states where any control qubit is |0>, apply U when all control qubits
-    are |1>.
+    are |1>, and preserve any global phase of U as a relative phase only on that
+    fully enabled control subspace. If `U = exp(i*α) * V`, synthesize the exact
+    enabled-subspace phase operator on the active control pattern together with
+    the controlled version of `V`; for all-positive controls this is the exact
+    fully-enabled-control phase on the control register itself.
   - `negctrl(n) @ U` → same as ctrl but conditioned on control qubits being |0>.
-    Implement as X on each negctrl qubit, then ctrl @ U, then X on each negctrl
+    Implement as X on each negctrl qubit, then the positive-control construction
+    above (including enabled-subspace phase promotion), then X on each negctrl
     qubit.
   - Chained modifiers are applied right-to-left (innermost first):
     `ctrl @ inv @ U` → first compute inv(U) = U†, then build controlled-U†.
+  - A zero-qubit `gphase(expr)` may be folded into the owning scope's
+    `globalPhase` only after all modifiers have been expanded and only if the
+    result is still a bare, unannotated, hoistable scope phase as defined in
+    Section 2.6. `inv @ gphase(expr)` becomes `gphase(-expr)`,
+    `pow(k) @ gphase(expr)` becomes `gphase(k*expr)`. If the resulting bare
+    phase is declaration-dependent, mutable-state-dependent, or otherwise
+    non-hoistable, keep it as a zero-qubit instruction.
+    `ctrl/negctrl @
+    gphase(expr)` synthesize exact enabled-subspace phase
+    operators that must **not** be folded into the scope scalar.
 - **Expand custom gate definitions** (`gate` bodies): inline the gate body with
   parameter substitution. Recursive gate definitions are expanded iteratively
   until only primitive gates remain.
@@ -2162,45 +2659,69 @@ For any single-qubit unitary U:
 U = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)
 ```
 
-Where:
+Where, with `wrapToPi(x)` meaning normalization to `(-pi, pi]` and `phase`
+returning the principal argument in `(-pi, pi]`:
 
 ```
 Given U = [[a, b], [c, d]], det(U) = a*d - b*c = exp(2i*alpha):
-alpha = phase(det(U)) / 2
+alpha = wrapToPi(phase(det(U)) / 2)   // unique principal half-angle, so alpha ∈ (-pi/2, pi/2]
 V = exp(-i*alpha) * U   (so det(V) = 1)
 V = [[v00, v01], [v10, v11]]
-gamma = 2 * arccos(|v00|)
-if |v00| > 0 and |v10| > 0:
-  beta  = phase(v10) - phase(v00)
-  delta = phase(-v01) - phase(v00)
-(handle edge cases where v00 or v10 are zero)
+gamma = clamp(2 * arccos(|v00|), 0, pi)
+if gamma is not approximately 0 or pi:
+  beta  = wrapToPi(phase(v10) - phase(v00))
+  delta = wrapToPi(phase(-v01) - phase(v00))
+else if gamma ≈ 0:
+  zeta  = phase(v11)
+  beta  = zeta
+  delta = zeta
+else: // gamma ≈ pi
+  zeta  = phase(v10)
+  beta  = zeta
+  delta = -zeta    // if zeta = pi, keep delta = -pi exactly for exact equality
 ```
 
-**Single-qubit decomposition into {RZ, SX} basis:**
+These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
+matches the canonical ranges from Section 2.5.
+
+**Single-qubit decomposition into {RZ, SX} basis (exact, phase-aware):**
 
 ```
-U = Rz(a) * SX * Rz(b) * SX * Rz(c)
+M = exp(i*eta) * Rz(a) * SX * Rz(b) * SX * Rz(c)
 ```
 
-Computed from the ZYZ decomposition using:
+Computed from the exact ZYZ decomposition
+`M = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)` using:
 
 ```
-Ry(gamma) = Rz(-pi/2) * Rx(gamma) * Rz(pi/2)
-Rx(gamma) = Rz(-pi/2) * SX * Rz(pi - gamma) * SX * Rz(-pi/2)
+Ry(gamma) = Rz(pi/2) * Rx(gamma) * Rz(-pi/2)
+Rx(gamma) = exp(-i*pi/2) * Rz(-pi/2) * SX * Rz(pi - gamma) * SX * Rz(-pi/2)
 ```
 
-Then merge adjacent Rz rotations. Special cases:
+Therefore one canonical exact choice is:
 
-- If gamma = 0 (diagonal gate): only 1 RZ needed.
-- If gamma = pi (anti-diagonal): only 1 SX + 2 RZ needed.
+```
+eta = alpha - pi/2
+a = beta
+b = pi - gamma
+c = delta - pi
+```
+
+Then merge adjacent Rz rotations if desired, while preserving the returned
+`eta`. Special cases:
+
+- If gamma = 0 (diagonal gate): no `SX` gates are needed; return the exact phase
+  and a single merged `RZ`.
+- If gamma = pi (anti-diagonal): only 1 `SX` + 2 `RZ` gates are needed, with the
+  omitted `SX` absorbed into the returned exact phase.
 
 **Two-qubit decomposition (KAK / Weyl decomposition):**
 
 Any two-qubit unitary can be decomposed into at most 3 CX gates plus
-single-qubit gates:
+single-qubit gates and one explicit global phase:
 
 ```
-U = (A1 x B1) * CX * (A2 x B2) * CX * (A3 x B3) * CX * (A4 x B4)
+U = exp(i*zeta) * (A1 x B1) * CX * (A2 x B2) * CX * (A3 x B3) * CX * (A4 x B4)
 ```
 
 Number of CX gates needed depends on entangling content:
@@ -2216,6 +2737,8 @@ Algorithm outline:
 2. Diagonalize M to find eigenvalues -> Weyl chamber coordinates (c0, c1, c2).
 3. Based on (c0, c1, c2), determine minimum CX count and compute single-qubit
    gates.
+4. Return `zeta` together with the gate sequence (or an equivalent phase-bearing
+   circuit object); exact recomposition must include `exp(i*zeta)`.
 
 **ECR-based backends:** For backends using ECR instead of CX:
 
@@ -2268,17 +2791,26 @@ e) Iterate until no more reductions or max iterations reached.
 - `translateToBasis(circuit, basisGates) -> QuantumCircuit` — Stage 4.
 - `optimize(circuit) -> QuantumCircuit` — Stage 5.
 - `decomposeZYZ(matrix) -> {alpha, beta, gamma, delta}` — ZYZ decomposition.
-- `decomposeToRzSx(matrix) -> Instruction[]` — Decompose to {RZ, SX} basis.
-- `decomposeKAK(matrix) -> Instruction[]` — KAK/Weyl decomposition.
+- `decomposeToRzSx(matrix) -> { globalPhase, instructions }` — Exact phase-aware
+  decomposition to the {RZ, SX} basis.
+- `decomposeKAK(matrix) -> { globalPhase, instructions }` — Exact phase-aware
+  KAK/Weyl decomposition.
 
 **Tests (minimum 55):**
 
 - **ZYZ decomposition:** Decompose H, X, Y, Z, S, T, RX(pi/4), arbitrary U ->
   recompose -> verify equals original matrix (within epsilon).
-- **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose ->
-  verify equals original.
+- **ZYZ canonicalization:** Verify returned `gamma ∈ [0, pi]`,
+  `beta/delta ∈ [-pi, pi]`, `alpha = wrapToPi(phase(det(U)) / 2)` (therefore
+  `alpha ∈ (-pi/2, pi/2]`), and the `gamma ≈ 0` / `gamma ≈ pi` tie-break rules
+  are followed exactly, including exact boundary cases such as `-I` and
+  `-RY(pi)`.
+- **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose
+  using the returned `globalPhase` -> verify exact equality with the original
+  matrix.
 - **KAK decomposition:** Decompose CX, SWAP, iSWAP, CZ, arbitrary 2-qubit
-  unitary -> recompose using CX + single-qubit gates -> verify.
+  unitary -> recompose using the returned `globalPhase` + CX + single-qubit
+  gates -> verify exact equality with the original matrix.
 - **KAK CX count:** CX needs 1 CX, SWAP needs 3, identity tensor needs 0.
 - **High-level synthesis:** SWAP decomposes into 3 CX. CCX decomposes into 1+2
   qubit gates.
@@ -2310,6 +2842,9 @@ e) Iterate until no more reductions or max iterations reached.
   matrix equivalence. `pow(2) @ t` produces S.
 - **Chained modifiers:** `ctrl @ inv @ s` produces controlled-Sdg. Verify on
   basis states.
+- **Gate modifier expansion — modified `gphase`:** `ctrl @ gphase(theta)` stays
+  a relative-phase operation on the enabled control subspace and is not folded
+  into the enclosing scope `globalPhase`.
 - **Custom gate inlining:** Define a gate `bell(q0, q1) { h q0; cx q0, q1; }`,
   use it, unroll -> verify equivalent to H + CX.
 - **Parameterized custom gate inlining:** Define
@@ -2983,6 +3518,7 @@ Produces a valid OpenQASM 3 program. Example showing many features:
 ```
 OPENQASM 3.0;
 include "stdgates.inc";
+gphase(0.7854);
 
 // Type declarations
 qubit[4] q;
@@ -3026,7 +3562,6 @@ data[0] = measure q[1];
 reset q[1];
 barrier q[0], q[1];
 delay[100ns] q[2];
-gphase(0.7854);
 
 // Physical qubit references
 cx $0, $1;
@@ -3082,6 +3617,11 @@ cx q[0], q[1];
 
 - First line: `OPENQASM 3.0;`
 - Second line: `include "stdgates.inc";`
+- If the top-level circuit has nonzero hoistable `globalPhase`, emit a
+  normalized leading bare `gphase(theta);` immediately after the last required
+  `include` directive and before any declarations or executable statements.
+- Any remaining statement-level bare `gphase(...)` instructions are emitted in
+  source order and are not moved ahead of declarations.
 - `qubit[N] q;` declares N qubits (virtual qubits)
 - `bit[M] name;` declares one named classical register
 - Emit one `bit[...] name;` declaration per classical register in circuit order.
@@ -3123,6 +3663,11 @@ cx q[0], q[1];
 - `gate name(params) qargs { body }` — serialize gate definitions before use
 - Parameters behave as angle types
 - Empty body = identity gate
+- If a gate body has nonzero hoistable `globalPhase`, serialize it as a
+  normalized leading bare `gphase(theta);` immediately after `{` inside the gate
+  body.
+- Any remaining statement-level bare `gphase(...)` inside the body stays in
+  source order.
 
 **Gate modifiers:**
 
@@ -3133,6 +3678,11 @@ cx q[0], q[1];
 - `inv @ gate qubits;` — inverse of gate
 - `pow(k) @ gate qubits;` — gate to the kth power
 - Modifiers can be chained: `ctrl @ inv @ gate qubits;`
+- Control-bearing or otherwise still-non-hoistable global phase stays a gate
+  instruction, e.g. `ctrl @ gphase(theta) q[0];`; it is **not** normalized into
+  the leading scope `gphase(...)`. By contrast, `inv @ gphase(theta)` and
+  `pow(k) @ gphase(theta)` are normalized by modifier expansion first and may
+  hoist only if the resulting bare phase is hoistable.
 
 **Gate instructions:**
 
@@ -3153,7 +3703,11 @@ cx q[0], q[1];
 - Reset: `reset q[j];`
 - Barrier: `barrier q[0], q[1], q[2];` (or `barrier q;` for all)
 - Delay: `delay[100ns] q[0];`
-- Global phase: `gphase(0.7854);`
+- Bare scope global phase: `gphase(0.7854);` For the hoistable scope-global
+  scalar, the serializer emits at most one normalized leading bare `gphase(...)`
+  statement per scope: after the include block for the top-level program, or
+  immediately after `{` for braced scopes. Non-hoistable bare `gphase(...)`
+  statements remain in source order instead.
 
 **Classical expressions and operators:**
 
@@ -3191,6 +3745,9 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
 - `return;` or `return expression;` — return from subroutine
 - Register references in conditions must preserve the original
   classical-register names
+- If a control-flow body has nonzero hoistable `globalPhase`, serialize it as a
+  normalized leading bare `gphase(theta);` inside that body scope.
+- Any non-hoistable bare `gphase(...)` inside the body remains in source order.
 
 **Subroutines:**
 
@@ -3198,6 +3755,10 @@ membership: `in` (e.g., `i in {0, 3}`) Assignment operators: `=`, `+=`, `-=`,
 - Parameters: classical types passed by value, qubits by reference
 - Array params: `readonly array[type, #dim=N] name` or `mutable array[...]`
 - `sizeof(array)` or `sizeof(array, dim)` — query array dimensions
+- If a subroutine body has nonzero hoistable `globalPhase`, serialize it as a
+  normalized leading bare `gphase(theta);` inside the subroutine body.
+- Any non-hoistable bare `gphase(...)` inside the subroutine body remains in
+  source order.
 
 **Extern declarations:**
 
@@ -3237,7 +3798,12 @@ Must handle all features listed above:
 - Gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`) including chains
 - Gate broadcasting (gate applied to register)
 - Measurement, reset, barrier, delay
-- Global phase (`gphase`)
+- Bare, unmodified global phase (`gphase`), folded into the current scope's
+  scalar `globalPhase`. After modifier expansion, `inv @ gphase` /
+  `pow(k) @
+  gphase` may also fold if the resulting bare phase is hoistable;
+  control- bearing or otherwise non-hoistable `gphase` stays an ordinary
+  instruction or equivalent relative-phase operator
 - Classical expressions: arithmetic, bitwise, comparison, logical operators
 - Assignment operators (`=`, `+=`, `-=`, `*=`, etc.)
 - Built-in constants (`pi`, `tau`, `euler`) and math functions (`sin`, `cos`,
@@ -3269,7 +3835,26 @@ Must handle all features listed above:
 - Verify reset format: `reset q[j];`.
 - Verify barrier format.
 - Verify delay format with units.
-- Verify global phase format: `gphase(theta);`.
+- Verify hoistable bare global phase format: `gphase(theta);`.
+- Verify a nonzero top-level hoistable `globalPhase` serializes immediately
+  after the include block as a normalized leading bare `gphase(theta);`.
+- Verify gate-definition and subroutine-body hoistable `globalPhase` round-trip
+  through normalized bare `gphase(theta);` statements without phase loss.
+- Verify hoistable symbolic bare `gphase(theta + phi/2);` round-trips without
+  numeric coercion.
+- Verify exact numeric `globalPhase` values may be reduced modulo `2*pi` when
+  doing so preserves the scalar exactly, but symbolic hoistable phases are
+  emitted in canonical stored form unless exact simplification proves unity.
+- Verify a declaration-dependent or otherwise non-hoistable bare `gphase(expr);`
+  remains in statement order and is not folded into the surrounding scope
+  `globalPhase`.
+- Verify an annotated bare `@tag gphase(theta);` round-trips as a statement and
+  is not folded into the surrounding scope `globalPhase`.
+- Verify `inv @ gphase(theta);` and `pow(2) @ gphase(theta);` normalize first
+  and serialize as hoisted bare `gphase(...)` only when the normalized result is
+  hoistable.
+- Verify `ctrl @ gphase(theta) q[0];` round-trips as a modifier-bearing
+  instruction and is not folded into the surrounding scope `globalPhase`.
 - Control flow: serialize/deserialize `if_test` with true and false body.
 - Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
@@ -3638,14 +4223,15 @@ verify output distribution matches expectations.
 23. **T * T = S**: Apply T twice, compare state to S.
 24. **H * Z * H = X**: Verify this identity via state vector.
 25. **H * X * H = Z**: Verify this identity.
-26. **RX(pi)|0> = -i|1>**: Verify via state vector (magnitude of |1> is 1).
+26. **RX(pi)|0> = -i|1>**: Verify the exact state vector `[0, -i]`.
 27. **RY(pi)|0> = |1>**: Verify via state vector.
-28. **RZ(pi) ~ Z** (up to global phase): Verify via measurement statistics.
+28. **RZ(pi) = (-i) * Z**: Verify by exact matrix or exact state-vector
+    comparison, and separately verify equality up to global phase with `Z`.
 29. **U gate reproduces X**: `U(pi, 0, pi)` -> same as X.
 30. **U gate reproduces H**: `U(pi/2, 0, pi)` -> same as H.
 31. **U gate reproduces Y**: `U(pi, pi/2, pi/2)` -> same as Y.
 32. **U1 = P**: Verify `U1(l)` matches `P(l)` for several l.
-33. **U2 correctness**: Verify `U2(0, pi)` = H (up to global phase).
+33. **U2 correctness**: Verify `U2(0, pi)` = `H` exactly.
 34. **Parameterized RX sweep**: Sweep theta from 0 to 2*pi, verify prob(1)
     follows sin^2(theta/2).
 35. **Parameterized RY sweep**: Similar.
