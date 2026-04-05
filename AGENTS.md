@@ -213,16 +213,16 @@ which produces the matrix:
 ```
 
 An exact arbitrary single-qubit unitary `M ∈ U(2)` requires one additional phase
-parameter:
+parameter relative to the named `U` gate:
 
 ```
-M = exp(i*α) * U(θ, φ, λ)
+M = exp(i*ω) * U(θ, φ, λ)
 ```
 
 Equivalently,
 
 ```
-M = exp(i*(α + (φ+λ)/2)) * RZ(φ) * RY(θ) * RZ(λ)
+M = exp(i*(ω + (φ+λ)/2)) * RZ(φ) * RY(θ) * RZ(λ)
 ```
 
 The factor `exp(i*(φ+λ)/2)` is the **global phase built into the named `U`
@@ -231,8 +231,11 @@ with the U-gate convention. Under the canonical decomposition ranges defined
 below, this also makes the `[0][0]` entry `cos(θ/2)` real and nonnegative. This
 factor must be included whenever the named `U(θ, φ, λ)` gate is recomposed
 exactly. More generally, exact ZYZ recomposition of an arbitrary single-qubit
-unitary must also track the separate overall phase parameter `α`; omitting
-either contribution causes exact matrix comparisons to fail.
+unitary must also track the separate overall phase parameter at the named-`U`
+level. In the exact ZYZ form used below, the corresponding overall phase is
+written as `α`, with `α = ω + (φ+λ)/2` and `ω = α - (φ+λ)/2`; omitting either
+the built-in `U` factor or the additional overall phase causes exact matrix
+comparisons to fail.
 
 Important naming distinction: within this specification, bare `U(θ, φ, λ)`
 refers to the library's **internal/API gate** defined above unless the text
@@ -267,6 +270,17 @@ adds `θ/2` to the stored fourth parameter, while exact emission of the library'
 internal `CU` as textual OpenQASM 3 `cu` subtracts `θ/2` from the stored fourth
 parameter or uses another phase-exact lowering.
 
+The same exact-spelling distinction applies to the standard-library textual
+rotation gates. Textual OpenQASM 3 `rx(θ)`, `ry(θ)`, and `rz(θ)` denote
+`exp(-i*θ*X)`, `exp(-i*θ*Y)`, and `exp(-i*θ*Z)` respectively, while this
+library's internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` use the negative-exponent
+half-angle convention from Section 2.2. Therefore exact parsing or
+canonicalization must map textual `rx(θ)` to internal `RX(2θ)`, textual `ry(θ)`
+to internal `RY(2θ)`, and textual `rz(θ)` to internal `RZ(2θ)`. Exact emission
+of internal `RX(θ)`, `RY(θ)`, or `RZ(θ)` as those same-name textual spellings
+must halve the angle. The standard-library controlled forms `crx`, `cry`, and
+`crz` inherit the same factor-of-two rule.
+
 For deterministic exact ZYZ decomposition of
 `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`, normalize outputs to:
 
@@ -275,21 +289,25 @@ Here and throughout this section, `wrapToPi(x)` means normalization to
 
 - `γ ∈ [0, π]`
 - `β, δ ∈ [-π, π]`
-- `α` is fixed by the principal half-argument of the determinant:
-  `α = wrapToPi(arg(det(M)) / 2)`, where `arg` returns the principal phase in
-  `(-π, π]` and maps the negative real axis to `π` rather than `-π`.
-  Equivalently, choose the unique representative `α ∈ (-π/2, π/2]` compatible
-  with `det(M) = exp(2iα)`.
-- Let `V = exp(-i*α) * M`, so `det(V) = 1`.
-- Detect the structural special cases before using the generic phase-difference
-  formulas. In numeric implementations use the dedicated decomposition-branch
-  tolerance `ε_ZYZ = 1e-12` for this structural classification only; exact or
-  symbolic implementations should instead branch from exact structure when
-  available. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`, set `γ = 0` and use the
-  diagonal branch below. If `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π`
-  and use the anti-diagonal branch below. Implementations must not select these
-  branches solely by comparing an `arccos`-derived `γ` against either the
-  library's default equality epsilon or any other post-hoc angle threshold.
+- `α ∈ (-π, π]`. Let `α0 = wrapToPi(arg(det(M)) / 2)`, where `arg` returns the
+  principal phase in `(-π, π]` and maps the negative real axis to `π` rather
+  than `-π`. This `α0` is the **primary half-determinant candidate** and lies in
+  `(-π/2, π/2]`, but the determinant fixes the overall phase only modulo `π`, so
+  exact decomposition needs one additional lift/sign choice in `SU(2)`.
+- Form the two candidate lifts, in this order:
+  `candidate 1: α = α0, V = exp(-i*α0) * M`;
+  `candidate 2: α = wrapToPi(α0 + π), V = -exp(-i*α0) * M`. Each candidate
+  satisfies `det(V) = 1`.
+- For a given candidate `V`, detect the structural special cases before using
+  the generic phase-difference formulas. In numeric implementations use the
+  dedicated decomposition-branch tolerance `ε_ZYZ = 1e-12` for this structural
+  classification only; exact or symbolic implementations should instead branch
+  from exact structure when available. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`,
+  set `γ = 0` and use the diagonal branch below. If
+  `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π` and use the anti-diagonal
+  branch below. Implementations must not select these branches solely by
+  comparing an `arccos`-derived `γ` against either the library's default
+  equality epsilon or any other post-hoc angle threshold.
 - Otherwise compute `γ = clamp(2 * arccos(|V[0][0]|), 0, π)`, where the clamp is
   only to absorb floating-point roundoff, and then set
   `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
@@ -305,6 +323,12 @@ Here and throughout this section, `wrapToPi(x)` means normalization to
   phase ratio. Let `ζ = arg(V[1][0]) ∈ (-π, π]`, and set `β = ζ`, `δ = -ζ`. When
   `ζ = π`, the canonical pair is `(β, δ) = (π, -π)`; this is why the closed
   interval `[-π, π]` is required at the boundary.
+- Recompose `M_candidate = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`. Choose the first
+  candidate, in the order above, whose recomposition matches `M` exactly in
+  exact/symbolic implementations or within the library comparison epsilon in
+  floating-point implementations. Implementations must not assume that the
+  primary half-determinant lift always works; otherwise the generic branch can
+  return `-M` for matrices whose exact decomposition requires the shifted lift.
 
 These normalization rules apply to decomposition/transpilation outputs so they
 are deterministic. User-facing gate constructors may accept any real angles and
@@ -455,7 +479,8 @@ explicitly and `V` the remaining phase-stripped operator, then the controlled
 version of `U` is **not** the same as the controlled version of `V`: when the
 control condition is satisfied, the target sees `U = exp(i*α) * V`, and the
 `exp(i*α)` factor applies only to that enabled subspace. For single-qubit `U`,
-Section 2.5 provides the canonical way to choose such an `α`.
+Section 2.5 provides the canonical phase-bearing forms needed to choose such a
+factor exactly.
 
 For the **single positive-control** case, the standard controlled-U construction
 handles this by applying `P(α)` to the control qubit:
@@ -642,16 +667,19 @@ same total unitary including global phase. For non-unitary scopes, it means the
 same declarations, executable-statement order, branch-local phase behavior, and
 evaluation order of any non-foldable `gphase`.
 
-Textual OpenQASM 3 built-in `U`, standard-library `cu`, and compatibility
-aliases such as `u1`, `u2`, and `u3` must likewise be handled phase-exactly
-according to the selected standard library, not by assuming they are identical
-to similarly named library API gates. A serializer may lower compatibility
-spellings to phase-exact `p` / `U` plus explicit `gphase(...)` compensation, and
-may lower textual `cu` to a phase-exact `ctrl @ U` form plus exact
-enabled-subspace phase compensation, instead of emitting those spellings
+Textual OpenQASM 3 built-in `U`, standard-library rotations `rx` / `ry` / `rz`
+and their controlled forms `crx` / `cry` / `crz`, standard-library `cu`, and
+compatibility aliases such as `u1`, `u2`, and `u3` must likewise be handled
+phase- and angle-exactly according to the selected standard library, not by
+assuming they are identical to similarly named library API gates. A serializer
+may lower same-name textual rotations through internal `RX` / `RY` / `RZ` with
+the exact factor-of-two angle conversion from Section 2.5, may lower
+compatibility spellings to phase-exact `p` / `U` plus explicit `gphase(...)`
+compensation, and may lower textual `cu` to a phase-exact `ctrl @ U` form plus
+exact enabled-subspace phase compensation, instead of emitting those spellings
 directly. A deserializer may likewise canonicalize any of these into internal
-`P`, `U`, `CU`, and explicit `globalPhase` or statement-level `gphase` so long
-as exact phase-aware semantics are preserved.
+`P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit `globalPhase` or statement-level
+`gphase` so long as exact phase-aware semantics are preserved.
 
 ---
 
@@ -1280,11 +1308,14 @@ return identity.
   `U3(th,ph,l) = U(th,ph,l)`
 - `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `Y = U(pi, pi/2, pi/2)`
 
-OpenQASM 3 note: textual compatibility spellings such as `u2` / `u3` must be
-serialized/deserialized phase-exactly and may require explicit `gphase`
-compensation instead of simple name-preserving round-trip. The formulas above
-use the library's internal `U`, not the textual OpenQASM 3 built-in `U`; the
-same phase-aware distinction also applies to textual OpenQASM 3 `cu`.
+OpenQASM 3 note: textual standard-library spellings such as `rx`, `ry`, `rz`,
+`u2`, `u3`, and `cu` must be serialized/deserialized phase-exactly and may
+require explicit `gphase` compensation or angle rescaling instead of simple
+name-preserving round-trip. In particular, textual `rx(θ)`, `ry(θ)`, and `rz(θ)`
+correspond exactly to internal `RX(2θ)`, `RY(2θ)`, and `RZ(2θ)` under this
+document's half-angle convention, and `crx` / `cry` / `crz` inherit the same
+doubling rule. The formulas above use the library's internal `U`, `RX`, `RY`,
+and `RZ`, not the textual OpenQASM 3 built-ins of the same spellings.
 
 ---
 
@@ -2296,7 +2327,10 @@ zero qubits and the desired `AngleExpr` parameter.
 
 `u2` / `u3` are programmatic compatibility helpers under this document's phase
 convention. Exact OpenQASM 3 serialization may lower them to `u` plus explicit
-phase compensation rather than preserving the same helper spelling.
+phase compensation rather than preserving the same helper spelling. The internal
+`rx` / `ry` / `rz` builder methods use this document's half-angle rotation
+convention; exact textual OpenQASM 3 `rx` / `ry` / `rz` spellings therefore use
+half the internal parameter on emission and double it on parse.
 
 **Two-Qubit Gates:**
 
@@ -2328,7 +2362,9 @@ phase compensation rather than preserving the same helper spelling.
 
 `cu1` / `cu3` are likewise programmatic compatibility helpers. Exact OpenQASM 3
 serialization may lower them to `cp`, `cu`, and explicit phase-preserving
-transformations instead of preserving those helper names.
+transformations instead of preserving those helper names. Likewise, exact
+textual OpenQASM 3 `crx` / `cry` / `crz` spellings must rescale angles by the
+same factor-of-two rule as their single-qubit `rx` / `ry` / `rz` counterparts.
 
 **Three-Qubit Gates:**
 
@@ -2952,10 +2988,10 @@ Convert every gate to the backend's basis gates.
 
 **Single-qubit decomposition (ZYZ):**
 
-For any single-qubit unitary U:
+For any single-qubit unitary matrix `M`:
 
 ```
-U = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)
+M = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)
 ```
 
 Where, with `wrapToPi(x)` meaning normalization to `(-pi, pi]` and `phase`
@@ -2963,26 +2999,32 @@ returning the principal argument in `(-pi, pi]` (mapping `-pi` to `pi` on the
 negative real axis):
 
 ```
-Given U = [[a, b], [c, d]], det(U) = a*d - b*c = exp(2i*alpha):
-alpha = wrapToPi(phase(det(U)) / 2)   // unique principal half-angle, so alpha ∈ (-pi/2, pi/2]
-V = exp(-i*alpha) * U   (so det(V) = 1)
-V = [[v00, v01], [v10, v11]]
-// If exact symbolic structure is available, prefer it over the numeric tests below.
-zyzBranchEps = 1e-12
-if max(|v01|, |v10|) <= zyzBranchEps:
-  gamma = 0
-  zeta  = phase(v11)
-  beta  = zeta
-  delta = zeta
-else if max(|v00|, |v11|) <= zyzBranchEps:
-  gamma = pi
-  zeta  = phase(v10)
-  beta  = zeta
-  delta = -zeta    // if zeta = pi, keep delta = -pi exactly for exact equality
-else:
-  gamma = clamp(2 * arccos(|v00|), 0, pi)
-  beta  = wrapToPi(phase(v10) - phase(v00))
-  delta = wrapToPi(phase(-v01) - phase(v00))
+Given M = [[m00, m01], [m10, m11]]:
+alpha0 = wrapToPi(phase(det(M)) / 2)   // primary half-determinant candidate, alpha0 ∈ (-pi/2, pi/2]
+for (alpha, V) in [
+  (alpha0, exp(-i*alpha0) * M),
+  (wrapToPi(alpha0 + pi), -exp(-i*alpha0) * M)
+]:
+  V = [[v00, v01], [v10, v11]]   // det(V) = 1
+  // If exact symbolic structure is available, prefer it over the numeric tests below.
+  zyzBranchEps = 1e-12
+  if max(|v01|, |v10|) <= zyzBranchEps:
+    gamma = 0
+    zeta  = phase(v11)
+    beta  = zeta
+    delta = zeta
+  else if max(|v00|, |v11|) <= zyzBranchEps:
+    gamma = pi
+    zeta  = phase(v10)
+    beta  = zeta
+    delta = -zeta    // if zeta = pi, keep delta = -pi exactly for exact equality
+  else:
+    gamma = clamp(2 * arccos(|v00|), 0, pi)
+    beta  = wrapToPi(phase(v10) - phase(v00))
+    delta = wrapToPi(phase(-v01) - phase(v00))
+  if exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta) equals M:
+    return {alpha, beta, gamma, delta}   // returned alpha ∈ (-pi, pi]
+error("exact ZYZ lift selection failed")
 ```
 
 Here `zyzBranchEps = 1e-12` is a dedicated structural branch-classification
@@ -2990,7 +3032,10 @@ tolerance for numeric implementations, not the library-wide equality epsilon.
 Exact or symbolic implementations should use exact diagonal / anti-diagonal
 structure when available. Implementations must not decide those branches solely
 from the `arccos`-derived `gamma`, because floating-point roundoff near `0` or
-`pi` can make that test numerically unstable.
+`pi` can make that test numerically unstable. The returned `alpha` is not fixed
+by the determinant alone: the primary candidate `alpha0` is preferred whenever
+it exactly recomposes `M`, otherwise the shifted candidate `wrapToPi(alpha0+pi)`
+supplies the missing `SU(2)` sign bit needed for exact equality.
 
 These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
 matches the canonical ranges from Section 2.5.
@@ -3115,12 +3160,16 @@ e) Iterate until no more reductions or max iterations reached.
 - **ZYZ decomposition:** Decompose H, X, Y, Z, S, T, RX(pi/4), arbitrary U ->
   recompose -> verify equals original matrix (within epsilon).
 - **ZYZ canonicalization:** Verify returned `gamma ∈ [0, pi]`,
-  `beta/delta ∈ [-pi, pi]`, `alpha = wrapToPi(phase(det(U)) / 2)` (therefore
-  `alpha ∈ (-pi/2, pi/2]`), and the diagonal / anti-diagonal tie-break rules are
-  chosen from exact symbolic structure when available or else the dedicated
-  `zyzBranchEps = 1e-12`, not solely from the `arccos`-derived `gamma`,
-  including exact boundary cases such as `-I` and `-RY(pi)` and floating-point
-  diagonal / anti-diagonal inputs.
+  `beta/delta ∈ [-pi, pi]`, `alpha ∈ (-pi, pi]`, and
+  `wrapToPi(2*alpha) = phase(det(U))`; with
+  `alpha0 = wrapToPi(phase(det(U)) / 2)`, verify the decomposition first tests
+  the primary half-determinant lift and falls back to the shifted lift
+  `wrapToPi(alpha0 + pi)` only when needed for exact equality, and verify the
+  diagonal / anti-diagonal tie-break rules are chosen from exact symbolic
+  structure when available or else the dedicated `zyzBranchEps = 1e-12`, not
+  solely from the `arccos`-derived `gamma`, including exact boundary cases such
+  as `-I`, `-RY(pi)`, `exp(i*3*pi/4) * RY(pi/4)`, and floating-point diagonal /
+  anti-diagonal inputs.
 - **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose
   using the returned `globalPhase` -> verify exact equality with the original
   matrix.
@@ -3832,11 +3881,12 @@ Implements the `Serializer` interface for OpenQASM 3 format. Must handle the
 the circuit builder's gate methods.
 
 Because this library tracks global phase exactly, the serializer/deserializer
-must treat textual OpenQASM 3 built-in `U`, standard-library `cu`, and
-compatibility spellings such as `u1`, `u2`, and `u3` phase-exactly. It may
-canonicalize them to internal `P`, `U`, `CU`, and explicit leading or
-statement-level `gphase(...)` instead of assuming they are simple synonyms for
-same-name library API gates.
+must treat textual OpenQASM 3 built-in `U`, standard-library rotations `rx`,
+`ry`, `rz` and their controlled forms `crx`, `cry`, `crz`, standard-library
+`cu`, and compatibility spellings such as `u1`, `u2`, and `u3` phase- and
+angle-exactly. It may canonicalize them to internal `P`, `RX`, `RY`, `RZ`, `U`,
+`CU`, and explicit leading or statement-level `gphase(...)` instead of assuming
+they are simple synonyms for same-name library API gates.
 
 **`serialize(circuit) -> string`**
 
@@ -4128,9 +4178,11 @@ Must handle all features listed above:
 - Textual OpenQASM 3 built-in `U` with exact phase-aware semantics, even when
   internally canonicalized to the library's `U` plus explicit `globalPhase` or
   statement-level `gphase`
-- Phase-sensitive spellings from `stdgates.inc` (`phase`, `cphase`, `id`, `u1`,
-  `u2`, `u3`, `cu`, `CX`) with exact phase-aware semantics, even when internally
-  canonicalized to `P`, `U`, `CU`, `CX`, and explicit `globalPhase`
+- Phase- or angle-sensitive spellings from `stdgates.inc` (`phase`, `cphase`,
+  `id`, `u1`, `u2`, `u3`, `rx`, `ry`, `rz`, `crx`, `cry`, `crz`, `cu`, `CX`)
+  with exact phase- and angle-aware semantics, even when internally
+  canonicalized to `P`, `RX`, `RY`, `RZ`, `U`, `CU`, `CX`, and explicit
+  `globalPhase`
 - Custom gate definitions (`gate name(params) qargs { body }`)
 - Gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`) including chains
 - Gate broadcasting (gate applied to register)
@@ -4206,6 +4258,14 @@ Must handle all features listed above:
 - Verify textual OpenQASM 3 built-in `U(theta, phi, lambda)` parses and
   reserializes without silent phase loss; canonicalization to the library's
   internal `U` must preserve the extracted `theta/2` phase explicitly.
+- Verify textual OpenQASM 3 standard-library `rx(theta)`, `ry(theta)`, and
+  `rz(theta)` parse and reserialize without factor-of-two errors; exact
+  canonicalization to internal `RX`, `RY`, and `RZ` must double the stored
+  angle, and exact emission back to those same-name textual spellings must halve
+  it again.
+- Verify textual OpenQASM 3 standard-library `crx(theta)`, `cry(theta)`, and
+  `crz(theta)` round-trip with the same factor-of-two rule on their angles and
+  without changing the enabled-subspace phase behavior.
 - Verify textual OpenQASM 3 `cu(theta, phi, lambda, gamma)` parses and
   reserializes without silent phase loss; conversion to the library's internal
   `CU` must add `theta/2` to the stored fourth parameter, and exact emission
