@@ -254,7 +254,16 @@ are deterministic. User-facing gate constructors may accept any real angles and
 must preserve the exact matrix implied by the supplied inputs rather than
 silently renormalizing them.
 
-Aliases: `U1(λ) = P(λ)`, `U3(θ,φ,λ) = U(θ,φ,λ)`, `U2(φ,λ) = U(π/2, φ, λ)`.
+Library API compatibility aliases: `U1(λ) = P(λ)` exactly. `U2(φ,λ)` and
+`U3(θ,φ,λ)` are legacy convenience names in this library with exact matrices
+`U(π/2, φ, λ)` and `U(θ,φ,λ)` respectively. These are API-level aliases under
+this document's phase convention; they are **not** by themselves a claim that
+the textual OpenQASM 3 compatibility spellings `u2` / `u3` may always be
+emitted, parsed, or round-tripped as simple phase-free synonyms. For exact
+OpenQASM 3 round-tripping, preserve the selected standard-library semantics of
+textual `u1` / `u2` / `u3`; if that requires an explicit compensating
+`gphase(...)` or `globalPhase`, carry it explicitly rather than silently
+collapsing it into a neighboring named `U`.
 
 #### 6. Global Phase Tracking
 
@@ -284,7 +293,13 @@ top level, immediately after the `OPENQASM` line and required `include`
 directives; in a braced scope, immediately after the opening `{`. Hoistable but
 non-foldable `gphase` statements remain ordinary zero-qubit instructions in
 source order. If unresolved symbols remain, any operation that needs a concrete
-complex scalar must bind them first.
+complex scalar must bind them first. For the top-level program scope, "already
+in scope at that scope's entry" means after the `OPENQASM` line and required
+`include` directives but before later declarations in that program unit.
+Therefore a top-level foldable scalar may depend on literals, built-in
+constants, and names already introduced before that point (for example via
+earlier includes), but not on declarations that first appear later in the same
+source unit.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
 expressions may be reduced modulo `2π` only when that reduction is exact.
@@ -450,7 +465,13 @@ rewriting or inexact floating simplification. When a scope's hoistable
 unannotated `gphase(θ);` for that scalar. For a braced scope, emit it
 immediately after that scope's opening brace. For the top-level program scope,
 emit it immediately after the `OPENQASM ...;` line and any required `include`
-directives, and before declarations or executable statements.
+directives, and before later declarations or executable statements, **only**
+when the expression is valid there. A normalized top-level hoisted phase may
+depend on literals, built-in constants, and names already in scope at that
+point, but not on declarations that first appear later in the same program unit.
+A declaration-dependent phase is therefore not foldable into the top-level
+scalar for normalized OpenQASM output and must remain as an explicit statement
+in valid source order.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
@@ -470,6 +491,14 @@ For purely unitary scopes, this means the same total unitary including global
 phase. For non-unitary scopes, it means the same declarations,
 executable-statement order, branch-local phase behavior, and evaluation order of
 any non-foldable `gphase`.
+
+OpenQASM 3 compatibility aliases such as `u1`, `u2`, and `u3` must likewise be
+handled phase-exactly according to the selected standard library, not by
+assuming they are always identical to any similarly named library API alias. A
+serializer may always lower them to phase-exact `p` / `u` plus explicit
+`gphase(...)` compensation instead of emitting the compatibility spelling
+directly. A deserializer may likewise canonicalize them into `P`, `U`, and
+explicit `globalPhase` so long as exact phase-aware semantics are preserved.
 
 ---
 
@@ -1051,29 +1080,29 @@ matrix. Together with CX, they form the universal alphabet.
 
 **Single-Qubit Gates (return 2×2 Matrix):**
 
-| Function             | Gate        | Matrix Definition                                                                    |
-| -------------------- | ----------- | ------------------------------------------------------------------------------------ |
-| `identityGate()`     | I           | `[[1, 0], [0, 1]]`                                                                   |
-| `hadamard()`         | H           | `(1/sqrt(2)) * [[1, 1], [1, -1]]`                                                    |
-| `pauliX()`           | X           | `[[0, 1], [1, 0]]`                                                                   |
-| `pauliY()`           | Y           | `[[0, -i], [i, 0]]`                                                                  |
-| `pauliZ()`           | Z           | `[[1, 0], [0, -1]]`                                                                  |
-| `pGate(lambda)`      | P(l)        | `[[1, 0], [0, exp(i*l)]]`                                                            |
-| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -i*e^(-i*ph)*sin(th/2)], [-i*e^(i*ph)*sin(th/2), cos(th/2)]]`          |
-| `rxGate(theta)`      | RX(th)      | `[[cos(th/2), -i*sin(th/2)], [-i*sin(th/2), cos(th/2)]]`                             |
-| `ryGate(theta)`      | RY(th)      | `[[cos(th/2), -sin(th/2)], [sin(th/2), cos(th/2)]]`                                  |
-| `rzGate(theta)`      | RZ(th)      | `[[exp(-i*th/2), 0], [0, exp(i*th/2)]]`                                              |
-| `sGate()`            | S           | `[[1, 0], [0, i]]`                                                                   |
-| `sdgGate()`          | Sdg         | `[[1, 0], [0, -i]]`                                                                  |
-| `sxGate()`           | SX          | `(1/2) * [[1+i, 1-i], [1-i, 1+i]]`                                                   |
-| `sxdgGate()`         | SXdg        | `(1/2) * [[1-i, 1+i], [1+i, 1-i]]`                                                   |
-| `tGate()`            | T           | `[[1, 0], [0, exp(i*pi/4)]]`                                                         |
-| `tdgGate()`          | Tdg         | `[[1, 0], [0, exp(-i*pi/4)]]`                                                        |
-| `uGate(th, ph, l)`   | U(th,ph,l)  | `[[cos(th/2), -exp(i*l)*sin(th/2)], [exp(i*ph)*sin(th/2), exp(i*(ph+l))*cos(th/2)]]` |
-| `u1Gate(lambda)`     | U1(l)       | Equivalent to `pGate(l)`: `[[1, 0], [0, exp(i*l)]]`                                  |
-| `u2Gate(phi, l)`     | U2(ph,l)    | `(1/sqrt(2)) * [[1, -exp(i*l)], [exp(i*ph), exp(i*(ph+l))]]`                         |
-| `u3Gate(th, ph, l)`  | U3(th,ph,l) | Identical to `uGate(th, ph, l)`                                                      |
-| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle \|v\|                                     |
+| Function             | Gate        | Matrix Definition                                                                                           |
+| -------------------- | ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `identityGate()`     | I           | `[[1, 0], [0, 1]]`                                                                                          |
+| `hadamard()`         | H           | `(1/sqrt(2)) * [[1, 1], [1, -1]]`                                                                           |
+| `pauliX()`           | X           | `[[0, 1], [1, 0]]`                                                                                          |
+| `pauliY()`           | Y           | `[[0, -i], [i, 0]]`                                                                                         |
+| `pauliZ()`           | Z           | `[[1, 0], [0, -1]]`                                                                                         |
+| `pGate(lambda)`      | P(l)        | `[[1, 0], [0, exp(i*l)]]`                                                                                   |
+| `rGate(theta, phi)`  | R(th,ph)    | `[[cos(th/2), -i*e^(-i*ph)*sin(th/2)], [-i*e^(i*ph)*sin(th/2), cos(th/2)]]`                                 |
+| `rxGate(theta)`      | RX(th)      | `[[cos(th/2), -i*sin(th/2)], [-i*sin(th/2), cos(th/2)]]`                                                    |
+| `ryGate(theta)`      | RY(th)      | `[[cos(th/2), -sin(th/2)], [sin(th/2), cos(th/2)]]`                                                         |
+| `rzGate(theta)`      | RZ(th)      | `[[exp(-i*th/2), 0], [0, exp(i*th/2)]]`                                                                     |
+| `sGate()`            | S           | `[[1, 0], [0, i]]`                                                                                          |
+| `sdgGate()`          | Sdg         | `[[1, 0], [0, -i]]`                                                                                         |
+| `sxGate()`           | SX          | `(1/2) * [[1+i, 1-i], [1-i, 1+i]]`                                                                          |
+| `sxdgGate()`         | SXdg        | `(1/2) * [[1-i, 1+i], [1+i, 1-i]]`                                                                          |
+| `tGate()`            | T           | `[[1, 0], [0, exp(i*pi/4)]]`                                                                                |
+| `tdgGate()`          | Tdg         | `[[1, 0], [0, exp(-i*pi/4)]]`                                                                               |
+| `uGate(th, ph, l)`   | U(th,ph,l)  | `[[cos(th/2), -exp(i*l)*sin(th/2)], [exp(i*ph)*sin(th/2), exp(i*(ph+l))*cos(th/2)]]`                        |
+| `u1Gate(lambda)`     | U1(l)       | Equivalent to `pGate(l)`: `[[1, 0], [0, exp(i*l)]]`                                                         |
+| `u2Gate(phi, l)`     | U2(ph,l)    | Legacy library alias for `uGate(pi/2, ph, l)`: `(1/sqrt(2)) * [[1, -exp(i*l)], [exp(i*ph), exp(i*(ph+l))]]` |
+| `u3Gate(th, ph, l)`  | U3(th,ph,l) | Legacy library alias for `uGate(th, ph, l)`                                                                 |
+| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle \|v\|                                                            |
 
 **RV Gate formula:** Let `angle = |v|/2`, `n = v/|v|` (unit vector). If |v| = 0,
 return identity.
@@ -1088,8 +1117,13 @@ return identity.
 - `T = P(pi/4)`, `S = P(pi/2)`, `Z = P(pi)`
 - `Sdg = S†`, `Tdg = T†`, `SXdg = SX†`
 - `SX * SX = X`, `SX * SXdg = I`
-- `U1(l) = P(l)`, `U3(th,ph,l) = U(th,ph,l)`
+- Library API aliases: `U1(l) = P(l)`, `U2(ph,l) = U(pi/2, ph, l)`,
+  `U3(th,ph,l) = U(th,ph,l)`
 - `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `Y = U(pi, pi/2, pi/2)`
+
+OpenQASM 3 note: textual compatibility spellings such as `u2` / `u3` must be
+serialized/deserialized phase-exactly and may require explicit `gphase`
+compensation instead of simple name-preserving round-trip.
 
 ---
 
@@ -1310,7 +1344,7 @@ CU(theta, phi, lambda, gamma, c, t) =
     P(gamma + (phi+lambda)/2)(c)
 ```
 
-**CU3 — Controlled-U3 (abstraction on CU, 2 CX)**
+**CU3 — Controlled-U3 (library compatibility alias on CU, 2 CX)**
 
 ```
 CU3(theta, phi, lambda, c, t) = CU(theta, phi, lambda, 0, c, t)
@@ -1366,11 +1400,12 @@ Proof: `H*Z*H = X`, so `(H⊗H) * (Z⊗Z) * (H⊗H) = X⊗X`. Conjugating
 **RYY — YY Ising Interaction (abstraction on RZZ, 2 CX)**
 
 ```
-RYY(theta, a, b) = RX(pi/2)(a) → RX(pi/2)(b) → RZZ(theta, a, b) → RX(-pi/2)(a) → RX(-pi/2)(b)
+RYY(theta, a, b) = RX(-pi/2)(a) → RX(-pi/2)(b) → RZZ(theta, a, b) → RX(pi/2)(a) → RX(pi/2)(b)
 ```
 
-Proof: `RX(pi/2)*Z*RX(-pi/2) = -Y` (conjugation), so
-`(RX(pi/2)⊗RX(pi/2)) * (Z⊗Z) * (RX(-pi/2)⊗RX(-pi/2)) = (-Y)⊗(-Y) = Y⊗Y`. ✓
+Proof: This is the circuit-time-order form of
+`(RX(pi/2)⊗RX(pi/2)) * RZZ(theta, a, b) * (RX(-pi/2)⊗RX(-pi/2))`. Since
+`RX(pi/2)*Z*RX(-pi/2) = -Y`, the conjugated generator is `(-Y)⊗(-Y) = Y⊗Y`. ✓
 
 **RZX — ZX Cross-Resonance Interaction (abstraction on RZZ, 2 CX)**
 
@@ -1733,7 +1768,8 @@ definitions. Tests verify that the composition yields these exact matrices.
 
 **CU1(l):** Same as CP(l).
 
-**CU3(th,ph,l):** Identity in |00⟩,|01⟩; U3(th,ph,l) in |10⟩,|11⟩.
+**CU3(th,ph,l):** Library compatibility alias for `CU(th,ph,l,0)`; identity in
+|00⟩,|01⟩; U3(th,ph,l) in |10⟩,|11⟩.
 
 **DCX:** `[[1,0,0,0],[0,0,1,0],[0,0,0,1],[0,1,0,0]]`
 
@@ -1842,8 +1878,9 @@ Every gate matrix must satisfy:
    decomposition equals the expected reference matrix (within epsilon).
 4. **Known eigenvalue/eigenvector relationships** where applicable.
 5. **Tier 0 equivalences:** `T = P(pi/4)`, `S = P(pi/2)`, `Z = P(pi)`,
-   `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `SX*SX = X`, `SX*SXdg = I`,
-   `U1(l) = P(l)`, `U3(th,ph,l) = U(th,ph,l)`, `CU1(l) = CP(l)`.
+   `X = U(pi, 0, pi)`, `H = U(pi/2, 0, pi)`, `SX*SX = X`, `SX*SXdg = I`, library
+   API aliases `U1(l) = P(l)`, `U2(ph,l) = U(pi/2, ph, l)`,
+   `U3(th,ph,l) = U(th,ph,l)`, and `CU1(l) = CP(l)`.
 6. **Compositional equivalences:**
    - `CZ = (I⊗H) · CX · (I⊗H)`
    - `CY = (I⊗S) · CX · (I⊗Sdg)`
@@ -1869,7 +1906,8 @@ convention above.
 - `uGate(pi, 0, pi) ~ pauliX()`.
 - `uGate(pi/2, 0, pi) ~ hadamard()`.
 - `u1Gate(l) ~ pGate(l)` for several values.
-- `u3Gate(th,ph,l) ~ uGate(th,ph,l)` for several values.
+- Library API alias check: `u3Gate(th,ph,l) ~ uGate(th,ph,l)` for several
+  values.
 - `rxGate(pi)` exactly equals `(-i) * X`; verify by exact matrix or exact
   state-vector comparison, not only by measurement statistics.
 - `ryGate(pi)` applied to |0> gives |1>.
@@ -2086,6 +2124,10 @@ than absorbed into `globalPhase`.
 - `qc.u3(theta, phi, lambda, qubit)`
 - `qc.rv(vx, vy, vz, qubit)`
 
+`u2` / `u3` are programmatic compatibility helpers under this document's phase
+convention. Exact OpenQASM 3 serialization may lower them to `u` plus explicit
+phase compensation rather than preserving the same helper spelling.
+
 **Two-Qubit Gates:**
 
 - `qc.ch(control, target)`
@@ -2113,6 +2155,10 @@ than absorbed into `globalPhase`.
 - `qc.rzx(theta, qubit0, qubit1)`
 - `qc.xxMinusYY(theta, beta, qubit0, qubit1)`
 - `qc.xxPlusYY(theta, beta, qubit0, qubit1)`
+
+`cu1` / `cu3` are likewise programmatic compatibility helpers. Exact OpenQASM 3
+serialization may lower them to `cp`, `cu`, and explicit phase-preserving
+transformations instead of preserving those helper names.
 
 **Three-Qubit Gates:**
 
@@ -3570,6 +3616,12 @@ Implements the `Serializer` interface for OpenQASM 3 format. Must handle the
 **complete OpenQASM 3 language** as defined below — not just the subset used by
 the circuit builder's gate methods.
 
+Because this library tracks global phase exactly, the serializer/deserializer
+must treat OpenQASM compatibility spellings such as `u1`, `u2`, and `u3`
+phase-exactly. It may canonicalize them to `p`, `u`, and explicit leading or
+statement-level `gphase(...)` instead of assuming they are simple synonyms for
+the library's internal API aliases.
+
 **`serialize(circuit) -> string`**
 
 Produces a valid OpenQASM 3 program. Example showing many features:
@@ -3853,6 +3905,9 @@ Must handle all features listed above:
 - `const`, `input`, `output` variable modifiers
 - `array` declarations with dimensions
 - All gate instructions with parameters
+- OpenQASM compatibility aliases from `stdgates.inc` (`phase`, `cphase`, `id`,
+  `u1`, `u2`, `u3`, `CX`) with exact phase-aware semantics, even when internally
+  canonicalized to `P`, `U`, `CX`, and explicit `globalPhase`
 - Custom gate definitions (`gate name(params) qargs { body }`)
 - Gate modifiers (`ctrl @`, `negctrl @`, `inv @`, `pow(k) @`) including chains
 - Gate broadcasting (gate applied to register)
@@ -3896,11 +3951,15 @@ Must handle all features listed above:
 - Verify delay format with units.
 - Verify hoistable bare global phase format: `gphase(theta);`.
 - Verify a nonzero top-level hoistable `globalPhase` serializes immediately
-  after the include block as a normalized leading bare `gphase(theta);`.
+  after the include block as a normalized leading bare `gphase(theta);` only
+  when its expression is valid there.
 - Verify gate-definition and subroutine-body hoistable `globalPhase` round-trip
   through normalized bare `gphase(theta);` statements without phase loss.
 - Verify hoistable symbolic bare `gphase(theta + phi/2);` round-trips without
   numeric coercion.
+- Verify a top-level symbolic `globalPhase` depending on a name declared later
+  in the same program unit is not folded into the normalized leading scalar and
+  instead remains in valid source order.
 - Verify exact numeric `globalPhase` values may be reduced modulo `2*pi` when
   doing so preserves the scalar exactly, but symbolic hoistable phases are
   emitted in canonical stored form unless exact simplification proves unity.
@@ -3916,6 +3975,9 @@ Must handle all features listed above:
   foldable.
 - Verify `ctrl @ gphase(theta) q[0];` round-trips as a modifier-bearing
   instruction and is not folded into the surrounding scope `globalPhase`.
+- Verify OpenQASM compatibility `u2` / `u3` parse and reserialize without silent
+  phase loss; exact round-trip may use `u` plus explicit `gphase(...)` instead
+  of re-emitting the same compatibility spelling.
 - Control flow: serialize/deserialize `if_test` with true and false body.
 - Control flow: serialize/deserialize `else if` chains.
 - Control flow: serialize/deserialize `while_loop`.
