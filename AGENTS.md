@@ -119,18 +119,22 @@ explicitly:
   `equalsUpToGlobalPhase` on matrices and state vectors must define the zero
   case explicitly: if both operands are numerically all-zero under the
   comparison epsilon, return `true`; if exactly one operand is numerically
-  all-zero, return `false`. Otherwise derive one candidate phase from a
-  corresponding pivot entry/amplitude that is nonzero in both operands, and
-  require every entry/amplitude to match under that same phase within epsilon.
-  Implementations must not compare only magnitudes or allow entry-wise varying
-  phases. For exact symbolic operands, the same semantic rule applies with
-  exact-zero and exact-entry matching instead of a floating comparison epsilon.
-  If an implementation cannot determine the required zero test, pivot, or common
-  phase exactly for unresolved symbolic values, it must either bind those values
-  before comparison or expose the operation as a numeric-only API. Public APIs
-  must document which behavior they use and must not silently degrade to a
-  weaker comparison such as magnitude-only matching, sampling-based checks, or
-  independent per-entry phase cancellation.
+  all-zero, return `false`. Otherwise choose one deterministic common pivot
+  position that is nonzero in both operands. In floating-point implementations,
+  choose the position maximizing `min(|a_i|, |b_i|)` and break ties by earliest
+  row-major/index order; exact or symbolic implementations that cannot compare
+  magnitudes exactly must instead choose the earliest row-major/index position
+  that is exact-nonzero in both operands. Derive one candidate phase from that
+  pivot and require every entry/amplitude to match under that same phase within
+  epsilon. Implementations must not compare only magnitudes or allow entry-wise
+  varying phases. For exact symbolic operands, the same semantic rule applies
+  with exact-zero and exact-entry matching instead of a floating comparison
+  epsilon. If an implementation cannot determine the required zero test,
+  canonical pivot, or common phase exactly for unresolved symbolic values, it
+  must either bind those values before comparison or expose the operation as a
+  numeric-only API. Public APIs must document which behavior they use and must
+  not silently degrade to a weaker comparison such as magnitude-only matching,
+  sampling-based checks, or independent per-entry phase cancellation.
 
 #### 2. Rotation Gates — Negative-Exponent Physics Convention
 
@@ -286,9 +290,14 @@ internal `CU` as textual OpenQASM 3 `cu` subtracts `θ/2` from the stored fourth
 parameter or uses another phase-exact lowering.
 
 The same exact-spelling distinction applies to the standard-library textual
-rotation gates. In this specification, the textual spellings are fixed by their
-exact matrices and therefore match the library's internal half-angle rotation
-convention exactly:
+rotation gates. In this specification, the normative OpenQASM 3 textual
+semantics for those same-name rotation spellings are the exact matrices below.
+If any external OpenQASM text, standard-library revision, or vendor
+documentation uses different prose, doubled-angle notation, or shorthand,
+implementations of this library must still target these matrices by explicit
+translation rather than by silently reinterpreting internal `RX` / `RY` / `RZ`.
+Under that adopted textual profile, the spellings match the library's internal
+half-angle rotation convention exactly:
 
 - `rx_OpenQASM3(θ) = [[cos(θ/2), -i*sin(θ/2)], [-i*sin(θ/2), cos(θ/2)]] = RX(θ)`
 - `ry_OpenQASM3(θ) = [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]] = RY(θ)`
@@ -351,14 +360,14 @@ structure when such structure is available directly.
   satisfies `det(V) = 1`.
 - For a given candidate `V`, detect the structural special cases before using
   the generic phase-difference formulas. In numeric implementations use the
-  dedicated decomposition-branch tolerance `ε_ZYZ = 1e-12` for this structural
-  classification only; exact or symbolic implementations should instead branch
-  from exact structure when available. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`,
-  set `γ = 0` and use the diagonal branch below. If
-  `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π` and use the anti-diagonal
-  branch below. Implementations must not select these branches solely by
-  comparing an `arccos`-derived `γ` against either the library's default
-  equality epsilon or any other post-hoc angle threshold.
+  dedicated decomposition-branch tolerance `ε_ZYZ = 1e-10`, equal by default to
+  the library comparison epsilon, for this structural classification only; exact
+  or symbolic implementations should instead branch from exact structure when
+  available. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`, set `γ = 0` and use the
+  diagonal branch below. If `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π`
+  and use the anti-diagonal branch below. Implementations must not select these
+  branches solely by comparing an `arccos`-derived `γ` against either the
+  library's default equality epsilon or any other post-hoc angle threshold.
 - Otherwise compute `γ = clamp(2 * arccos(|V[0][0]|), 0, π)`, where the clamp is
   only to absorb floating-point roundoff, and then set
   `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
@@ -461,26 +470,35 @@ representation being built. In particular, a builder-origin bare
 `globalPhaseGate(θ)` denotes canonical leading scope-global phase only when its
 expression is already valid at the owning scope's entry under the same
 hoistability and immutability rule above. For the canonical programmatic builder
-API, free symbolic `Param` leaves in that expression are treated as already in
-scope at the owning scope's entry unless a richer front-end explicitly models
-them as loop variables or mutable classical storage; the builder does not impose
-a later declaration order on such symbols. A declaration-dependent,
-mutable-state-dependent, or otherwise non-hoistable programmatic zero-qubit
-phase is not represented by the `globalPhase` scalar; it must remain an ordinary
-instruction, or be rejected by APIs that expose only canonical scope-global
-phase. For parsed OpenQASM 3, foldable means belonging to the maximal leading
-run of bare, unmodified, unannotated, hoistable `gphase(...)` statements in that
-scope: at top level, immediately after the `OPENQASM` line and required
-`include` directives; in a braced scope, immediately after the opening `{`.
-Hoistable but non-foldable `gphase` statements remain ordinary zero-qubit
-instructions in source order. If unresolved symbols remain, any operation that
-needs a concrete complex scalar must bind them first. For the top-level program
-scope, "already in scope at that scope's entry" means after the `OPENQASM` line
-and required `include` directives but before later declarations in that program
-unit. Therefore a top-level foldable scalar may depend on literals, built-in
-constants, and names already introduced before that point (for example via
-earlier includes), but not on declarations that first appear later in the same
-source unit.
+API, free symbolic `Param` leaves in that expression are treated as abstract
+scope-entry symbols unless a richer front-end explicitly models them as loop
+variables or mutable classical storage; the builder does not impose a later
+declaration order on such symbols. This in-memory admission rule is distinct
+from serializer-side textual foldability: a builder-origin `globalPhase`
+expression may be valid at circuit-scope entry yet still be non-foldable for a
+concrete textual format whose canonical leading-phase position precedes
+declarations needed to bring some referenced names into scope. In that case the
+serializer must preserve semantics by re-materializing the affected phase as an
+ordinary zero-qubit `gphase` at the earliest source position where its
+expression is in scope and the phase remains unconditional for the rest of that
+scope, rather than by illegally hoisting it or silently dropping it. If the
+target format cannot represent that statement-level phase without loss,
+serialization must fail. A declaration-dependent, mutable-state-dependent, or
+otherwise non-hoistable programmatic zero-qubit phase is not represented by the
+`globalPhase` scalar; it must remain an ordinary instruction, or be rejected by
+APIs that expose only canonical scope-global phase. For parsed OpenQASM 3,
+foldable means belonging to the maximal leading run of bare, unmodified,
+unannotated, hoistable `gphase(...)` statements in that scope: at top level,
+immediately after the `OPENQASM` line and required `include` directives; in a
+braced scope, immediately after the opening `{`. Hoistable but non-foldable
+`gphase` statements remain ordinary zero-qubit instructions in source order. If
+unresolved symbols remain, any operation that needs a concrete complex scalar
+must bind them first. For the top-level program scope, "already in scope at that
+scope's entry" means after the `OPENQASM` line and required `include` directives
+but before later declarations in that program unit. Therefore a top-level
+foldable scalar may depend on literals, built-in constants, and names already
+introduced before that point (for example via earlier includes), but not on
+declarations that first appear later in the same source unit.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
 expressions may be reduced modulo `2π` only when that reduction is exact. This
@@ -793,9 +811,13 @@ scope, emit it immediately after the `OPENQASM ...;` line and any required
 **only** when the expression is valid there. A normalized top-level hoisted
 phase may depend on literals, built-in constants, and names already in scope at
 that point, but not on declarations that first appear later in the same program
-unit. A declaration-dependent phase is therefore not foldable into the top-level
-scalar for normalized OpenQASM output and must remain as an explicit statement
-in valid source order.
+unit. If a stored top-level `globalPhase` depends on names that are not yet in
+scope at that canonical leading position, the serializer must not emit it there;
+instead it must preserve semantics by emitting an ordinary bare `gphase(θ);` at
+the earliest valid source position after the declarations that bring those names
+into scope. A declaration-dependent phase is therefore not foldable into the
+top-level scalar for normalized OpenQASM output and must remain as an explicit
+statement in valid source order.
 
 The deserializer must parse bare, unmodified `gphase(θ);` wherever it is allowed
 in a scope. It may fold such a statement into that scope's scalar only when the
@@ -819,16 +841,20 @@ evaluation order of any non-foldable `gphase`.
 Textual OpenQASM 3 built-in `U`, standard-library rotations `rx` / `ry` / `rz`
 and their controlled forms `crx` / `cry` / `crz`, standard-library `cu`, and
 compatibility aliases such as `u1`, `u2`, and `u3` must likewise be handled
-phase- and angle-exactly according to the selected standard library, not by
-assuming they are identical to similarly named library API gates. A serializer
-may lower same-name textual rotations through internal `RX` / `RY` / `RZ` with
-the exact same angle parameter from Section 2.5, may lower compatibility
-spellings to phase-exact `p` / `U` plus explicit `gphase(...)` compensation, and
-may lower textual `cu` to a phase-exact `ctrl @ U` form plus exact
-enabled-subspace phase compensation, instead of emitting those spellings
-directly. A deserializer may likewise canonicalize any of these into internal
-`P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit `globalPhase` or statement-level
-`gphase` so long as exact phase-aware semantics are preserved.
+phase- and angle-exactly according to the exact matrix relations fixed in
+Section 2.5 for this library's OpenQASM 3 profile, not by assuming they are
+identical to similarly named library API gates. If a concrete external profile
+uses different same-name rotation parameterization, the serializer/deserializer
+must translate explicitly at the format boundary rather than reinterpret the
+internal gates. A serializer may lower same-name textual rotations through
+internal `RX` / `RY` / `RZ` with the exact same angle parameter from Section
+2.5, may lower compatibility spellings to phase-exact `p` / `U` plus explicit
+`gphase(...)` compensation, and may lower textual `cu` to a phase-exact
+`ctrl @ U` form plus exact enabled-subspace phase compensation, instead of
+emitting those spellings directly. A deserializer may likewise canonicalize any
+of these into internal `P`, `RX`, `RY`, `RZ`, `U`, `CU`, and explicit
+`globalPhase` or statement-level `gphase` so long as exact phase-aware semantics
+are preserved.
 
 #### 11. Minimum Phase-Aware Test Matrix
 
@@ -838,8 +864,8 @@ following phase-sensitive cases:
 - **Phase-sensitive equality vs physical equivalence:** `Matrix.equals` and
   state-vector equality must reject operands that differ by a uniform global
   phase; `equalsUpToGlobalPhase` must accept them. Include both all-zero
-  operands, exactly one all-zero operand, and a nonzero case using a single
-  shared pivot phase.
+  operands, exactly one all-zero operand, and a nonzero case that exercises the
+  deterministic pivot-selection rule.
 - **`RZ` versus `P`:** verify `RZ(θ) = exp(-i*θ/2) * P(θ)` exactly, verify
   `RZ(θ)` and `P(θ)` are not matrix-equal for generic `θ`, and verify `CRZ(θ)`
   and `CP(θ)` are distinct on the enabled subspace.
@@ -1213,12 +1239,15 @@ Canonical phase representation:
   scopes, emit the scalar immediately after the opening brace and before the
   rest of the body statements. For the top-level program scope, emit the scalar
   immediately after the `OPENQASM` version line and any required `include`
-  directives, and before declarations or executable statements; because the
-  scalar is stored only in canonical entry form, it must not depend on names
-  declared later in that scope. "Normalized" here means one leading canonical
-  `gphase(theta);` per scope in the implementation's canonical stored
-  `AngleExpr` form; it does not require proving symbolic `2πk = 0` identities
-  beyond the exact simplifications the implementation already supports.
+  directives, and before declarations or executable statements, only when the
+  stored expression is valid there. If a stored top-level `globalPhase`
+  references names that become available only after later declarations, the
+  serializer must demote it back to an ordinary bare `gphase(theta);` at the
+  earliest valid source position instead of emitting it as the normalized
+  leading scalar. "Normalized" here means one leading canonical `gphase(theta);`
+  per scope in the implementation's canonical stored `AngleExpr` form; it does
+  not require proving symbolic `2πk = 0` identities beyond the exact
+  simplifications the implementation already supports.
 
 Shot count is a **per-execution / per-submitted-job input**, not a backend
 capability field. Do not store it on `BackendConfiguration`; carry it in the
@@ -1509,11 +1538,12 @@ OpenQASM 3 note: textual standard-library spellings such as `rx`, `ry`, `rz`,
 `u2`, `u3`, and `cu` must be serialized/deserialized phase-exactly and may
 require explicit `gphase` compensation or other phase-aware lowering instead of
 simple name-preserving round-trip. In particular, textual `rx(θ)`, `ry(θ)`, and
-`rz(θ)` correspond exactly to internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` under this
-document's half-angle convention, and `crx` / `cry` / `crz` preserve the same
-angle. By contrast, textual `U`, `cu`, `u2`, and `u3` may still require explicit
-`gphase` compensation. The formulas above use the library's internal `U`, `RX`,
-`RY`, and `RZ`, not the textual OpenQASM 3 built-ins of the same spellings.
+`rz(θ)` correspond exactly to internal `RX(θ)`, `RY(θ)`, and `RZ(θ)` under the
+normative OpenQASM 3 profile fixed in Section 2.5, and `crx` / `cry` / `crz`
+preserve the same angle. By contrast, textual `U`, `cu`, `u2`, and `u3` may
+still require explicit `gphase` compensation. The formulas above use the
+library's internal `U`, `RX`, `RY`, and `RZ`, not the textual OpenQASM 3
+built-ins of the same spellings.
 
 ---
 
@@ -2489,8 +2519,13 @@ must already be valid at the owning scope's entry under Section 2.6. A
 declaration-dependent or otherwise non-hoistable programmatic zero-qubit phase
 must instead remain an ordinary instruction, or be rejected by APIs that expose
 only canonical scope-global phase. In the canonical builder API, free symbolic
-`Param` leaves are treated as scope-entry symbols by construction; loop
-parameters and mutable classical values are not. Deserialized OpenQASM bare
+`Param` leaves are treated as abstract scope-entry symbols by construction; loop
+parameters and mutable classical values are not. That builder-side normalization
+does not guarantee that every textual serializer may keep the phase in canonical
+leading position: if a stored `globalPhase` later references names that are not
+yet in scope at a target format's leading-phase position, the serializer must
+emit it as an ordinary statement-level `gphase` at the earliest valid position
+in that scope rather than hoist it illegally. Deserialized OpenQASM bare
 `gphase(theta)` that is non-hoistable, or simply not foldable under Section 2.6
 because it is not in canonical leading position, must instead remain an ordinary
 zero-qubit instruction. A control-bearing form such as `ctrl @ gphase(theta)` is
@@ -2528,8 +2563,9 @@ zero qubits and the desired `AngleExpr` parameter.
 convention. Exact OpenQASM 3 serialization may lower them to `u` plus explicit
 phase compensation rather than preserving the same helper spelling. The internal
 `rx` / `ry` / `rz` builder methods already match textual OpenQASM 3 `rx` / `ry`
-/ `rz` angle-for-angle; by contrast, textual `U`, `cu`, `u2`, and `u3` may
-require explicit phase compensation on serialization/deserialization.
+/ `rz` angle-for-angle under the Section 2.5 OpenQASM profile; by contrast,
+textual `U`, `cu`, `u2`, and `u3` may require explicit phase compensation on
+serialization/deserialization.
 
 **Two-Qubit Gates:**
 
@@ -2563,8 +2599,9 @@ require explicit phase compensation on serialization/deserialization.
 serialization may lower them to `cp`, `cu`, and explicit phase-preserving
 transformations instead of preserving those helper names. Likewise, exact
 textual OpenQASM 3 `crx` / `cry` / `crz` spellings preserve the same angle as
-their internal counterparts; only textual `U` / `cu` / `u2` / `u3` require the
-additional phase-aware conversions from Section 2.5.
+their internal counterparts under the Section 2.5 OpenQASM profile; only textual
+`U` / `cu` / `u2` / `u3` require the additional phase-aware conversions from
+Section 2.5.
 
 **Three-Qubit Gates:**
 
@@ -3208,7 +3245,7 @@ for (alpha, V) in [
 ]:
   V = [[v00, v01], [v10, v11]]   // det(V) = 1
   // If exact symbolic structure is available, prefer it over the numeric tests below.
-  zyzBranchEps = 1e-12
+  zyzBranchEps = 1e-10
   if max(|v01|, |v10|) <= zyzBranchEps:
     gamma = 0
     zeta  = phase(v11)
@@ -3241,18 +3278,19 @@ for (alpha, V) in [
 error("exact ZYZ lift selection failed")
 ```
 
-Here `zyzBranchEps = 1e-12` is a dedicated structural branch-classification
-tolerance for numeric implementations, not the library-wide equality epsilon.
-Exact or symbolic implementations should use exact diagonal / anti-diagonal
-structure when available. Implementations must not decide those branches solely
-from the `arccos`-derived `gamma`, because floating-point roundoff near `0` or
-`pi` can make that test numerically unstable. When the generic formulas land
-within `zyzBranchEps` of either boundary, numeric implementations must also try
-the corresponding structural tuple and prefer it if that tuple recomposes within
-the library comparison epsilon. The returned `alpha` is not fixed by the
-determinant alone: the primary candidate `alpha0` is preferred whenever it
-exactly recomposes `M`, otherwise the shifted candidate `wrapToPi(alpha0+pi)`
-supplies the missing `SU(2)` sign bit needed for exact equality.
+Here `zyzBranchEps = 1e-10` is the dedicated structural branch-classification
+tolerance for numeric implementations and, by default, equals the library-wide
+equality epsilon. Exact or symbolic implementations should use exact diagonal /
+anti-diagonal structure when available. Implementations must not decide those
+branches solely from the `arccos`-derived `gamma`, because floating-point
+roundoff near `0` or `pi` can make that test numerically unstable. When the
+generic formulas land within `zyzBranchEps` of either boundary, numeric
+implementations must also try the corresponding structural tuple and prefer it
+if that tuple recomposes within the library comparison epsilon. The returned
+`alpha` is not fixed by the determinant alone: the primary candidate `alpha0` is
+preferred whenever it exactly recomposes `M`, otherwise the shifted candidate
+`wrapToPi(alpha0+pi)` supplies the missing `SU(2)` sign bit needed for exact
+equality.
 
 These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
 matches the canonical ranges from Section 2.5.
@@ -3383,7 +3421,7 @@ e) Iterate until no more reductions or max iterations reached.
   the primary half-determinant lift and falls back to the shifted lift
   `wrapToPi(alpha0 + pi)` only when needed for exact equality, and verify the
   diagonal / anti-diagonal tie-break rules are chosen from exact symbolic
-  structure when available or else the dedicated `zyzBranchEps = 1e-12`, not
+  structure when available or else the dedicated `zyzBranchEps = 1e-10`, not
   solely from the `arccos`-derived `gamma`, including exact boundary cases such
   as `-I`, `-RY(pi)`, `exp(i*3*pi/4) * RY(pi/4)`, and floating-point diagonal /
   anti-diagonal inputs; when a provisional generic solution lands within
@@ -4104,9 +4142,13 @@ Because this library tracks global phase exactly, the serializer/deserializer
 must treat textual OpenQASM 3 built-in `U`, standard-library rotations `rx`,
 `ry`, `rz` and their controlled forms `crx`, `cry`, `crz`, standard-library
 `cu`, and compatibility spellings such as `u1`, `u2`, and `u3` phase- and
-angle-exactly. It may canonicalize them to internal `P`, `RX`, `RY`, `RZ`, `U`,
-`CU`, and explicit leading or statement-level `gphase(...)` instead of assuming
-they are simple synonyms for same-name library API gates.
+angle-exactly using the exact matrix relations fixed in Section 2.5 for this
+library's OpenQASM 3 profile. If some external profile uses different same-name
+rotation parameterization, this serializer must translate explicitly at the
+format boundary rather than assuming those spellings are simple synonyms for
+same-name library API gates. It may canonicalize them to internal `P`, `RX`,
+`RY`, `RZ`, `U`, `CU`, and explicit leading or statement-level `gphase(...)`
+instead of assuming they are simple synonyms for same-name library API gates.
 
 **`serialize(circuit) -> string`**
 
@@ -4451,9 +4493,10 @@ Must handle all features listed above:
   through normalized bare `gphase(theta);` statements without phase loss.
 - Verify hoistable symbolic bare `gphase(theta + phi/2);` round-trips without
   numeric coercion.
-- Verify a top-level symbolic `globalPhase` depending on a name declared later
-  in the same program unit is not folded into the normalized leading scalar and
-  instead remains in valid source order.
+- Verify a builder-origin or parsed top-level symbolic `globalPhase` depending
+  on a name declared later in the same program unit is not folded into the
+  normalized leading scalar and is instead re-materialized as an ordinary bare
+  `gphase(...)` in the earliest valid source position.
 - Verify exact numeric `globalPhase` values may be reduced modulo `2*pi` when
   doing so preserves the scalar exactly, but symbolic hoistable phases are
   emitted in canonical stored form unless exact simplification proves unity.
