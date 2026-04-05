@@ -274,13 +274,14 @@ Here and throughout this section, `wrapToPi(x)` means normalization to
   with `det(M) = exp(2iα)`.
 - Let `V = exp(-i*α) * M`, so `det(V) = 1`.
 - Detect the structural special cases before using the generic phase-difference
-  formulas. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`, set `γ = 0` and use the
+  formulas. In numeric implementations use the dedicated decomposition-branch
+  tolerance `ε_ZYZ = 1e-12` for this structural classification only; exact or
+  symbolic implementations should instead branch from exact structure when
+  available. If `max(|V[0][1]|, |V[1][0]|) <= ε_ZYZ`, set `γ = 0` and use the
   diagonal branch below. If `max(|V[0][0]|, |V[1][1]|) <= ε_ZYZ`, set `γ = π`
-  and use the anti-diagonal branch below. Here `ε_ZYZ` is a dedicated
-  decomposition-branch tolerance used only for this structural classification;
-  it need not equal the library's default equality epsilon, and implementations
-  must not select these branches solely by comparing an `arccos`-derived `γ`
-  against the default equality epsilon.
+  and use the anti-diagonal branch below. Implementations must not select these
+  branches solely by comparing an `arccos`-derived `γ` against either the
+  library's default equality epsilon or any other post-hoc angle threshold.
 - Otherwise compute `γ = clamp(2 * arccos(|V[0][0]|), 0, π)`, where the clamp is
   only to absorb floating-point roundoff, and then set
   `β = wrapToPi(arg(V[1][0]) - arg(V[0][0]))` and
@@ -336,42 +337,47 @@ expression, not only as a floating-point number. However, it stores only phase
 that is both **hoistable** to the entry of the owning scope without changing
 semantics and **foldable** into that scope's canonical leading phase
 representation. A bare phase statement is hoistable only if it is unmodified,
-unannotated, and its expression depends only on symbols that are already in
-scope at that scope's entry and remain immutable throughout that scope. For this
-rule, "immutable" means the referenced binding's value cannot be changed by
+unannotated, executes exactly once on every dynamic path through the owning
+scope, and its expression depends only on symbols that are already in scope at
+that scope's entry and remain immutable throughout that scope. For this rule,
+"immutable" means the referenced binding's value cannot be changed by
 assignment, rebinding, mutation of referenced storage, or loop-index update
 anywhere during execution of that scope or its nested bodies. Literals, built-in
 constants, `const` declarations, already-bound gate/subroutine parameters, and
 read-only `input` values or read-only aliases/slices of such values count as
 immutable. Loop variables, mutable classical variables or arrays, `output`
 variables, and any binding whose referenced storage may be written in that scope
-or a reachable nested scope do not. If an implementation cannot prove that a
-referenced value is immutable for the whole scope, it must treat the phase
-statement as non-hoistable. A phase is foldable into `globalPhase` only if it is
-already in the canonical leading-phase position for the representation being
-built. In particular, a builder-origin bare `globalPhaseGate(θ)` denotes
-canonical leading scope-global phase only when its expression is already valid
-at the owning scope's entry under the same hoistability and immutability rule
-above. For the canonical programmatic builder API, free symbolic `Param` leaves
-in that expression are treated as already in scope at the owning scope's entry
-unless a richer front-end explicitly models them as loop variables or mutable
-classical storage; the builder does not impose a later declaration order on such
-symbols. A declaration-dependent, mutable-state-dependent, or otherwise
-non-hoistable programmatic zero-qubit phase is not represented by the
-`globalPhase` scalar; it must remain an ordinary instruction, or be rejected by
-APIs that expose only canonical scope-global phase. For parsed OpenQASM 3,
-foldable means belonging to the maximal leading run of bare, unmodified,
-unannotated, hoistable `gphase(...)` statements in that scope: at top level,
-immediately after the `OPENQASM` line and required `include` directives; in a
-braced scope, immediately after the opening `{`. Hoistable but non-foldable
-`gphase` statements remain ordinary zero-qubit instructions in source order. If
-unresolved symbols remain, any operation that needs a concrete complex scalar
-must bind them first. For the top-level program scope, "already in scope at that
-scope's entry" means after the `OPENQASM` line and required `include` directives
-but before later declarations in that program unit. Therefore a top-level
-foldable scalar may depend on literals, built-in constants, and names already
-introduced before that point (for example via earlier includes), but not on
-declarations that first appear later in the same source unit.
+or a reachable nested scope do not. Relative to a parent scope, a phase inside a
+conditional arm, `switch` case, or loop body is therefore non-hoistable out of
+that nested scope because it does not execute exactly once on every dynamic path
+of the parent. If an implementation cannot prove that both the execution-count
+condition and the immutability condition hold for the whole scope, it must treat
+the phase statement as non-hoistable. A phase is foldable into `globalPhase`
+only if it is already in the canonical leading-phase position for the
+representation being built. In particular, a builder-origin bare
+`globalPhaseGate(θ)` denotes canonical leading scope-global phase only when its
+expression is already valid at the owning scope's entry under the same
+hoistability and immutability rule above. For the canonical programmatic builder
+API, free symbolic `Param` leaves in that expression are treated as already in
+scope at the owning scope's entry unless a richer front-end explicitly models
+them as loop variables or mutable classical storage; the builder does not impose
+a later declaration order on such symbols. A declaration-dependent,
+mutable-state-dependent, or otherwise non-hoistable programmatic zero-qubit
+phase is not represented by the `globalPhase` scalar; it must remain an ordinary
+instruction, or be rejected by APIs that expose only canonical scope-global
+phase. For parsed OpenQASM 3, foldable means belonging to the maximal leading
+run of bare, unmodified, unannotated, hoistable `gphase(...)` statements in that
+scope: at top level, immediately after the `OPENQASM` line and required
+`include` directives; in a braced scope, immediately after the opening `{`.
+Hoistable but non-foldable `gphase` statements remain ordinary zero-qubit
+instructions in source order. If unresolved symbols remain, any operation that
+needs a concrete complex scalar must bind them first. For the top-level program
+scope, "already in scope at that scope's entry" means after the `OPENQASM` line
+and required `include` directives but before later declarations in that program
+unit. Therefore a top-level foldable scalar may depend on literals, built-in
+constants, and names already introduced before that point (for example via
+earlier includes), but not on declarations that first appear later in the same
+source unit.
 
 The semantic scalar is `exp(i * globalPhase)`. Therefore purely numeric phase
 expressions may be reduced modulo `2π` only when that reduction is exact. This
@@ -938,18 +944,19 @@ Canonical phase representation:
   non-integer `k` only after exact principal-phase reduction).
 - When parsing OpenQASM 3, fold only foldable bare, unmodified, unannotated
   `gphase(theta);` statements encountered in a given scope into that scope's
-  scalar by addition. A statement is hoistable if its expression can be moved to
-  the scope entry without changing meaning: all referenced symbols are already
-  in scope there and remain immutable throughout the scope. For parsed OpenQASM,
+  scalar by addition. A statement is hoistable if it can be moved to the scope
+  entry without changing meaning: it must execute exactly once on every dynamic
+  path through that scope, and all referenced symbols must already be in scope
+  there and remain immutable throughout the scope. For parsed OpenQASM,
   foldability is stricter: only the maximal leading run of bare, unmodified,
   unannotated, hoistable `gphase(theta);` statements in canonical leading
   position folds into the scalar; later hoistable bare `gphase` statements
   remain ordinary zero-qubit instructions in source order. Control-flow bodies
-  are nested `QuantumCircuit` scopes, so branch-local phases remain
-  branch-local. Modifier-bearing forms such as `ctrl @ gphase(theta)`, and
-  annotated bare forms such as `@tag gphase(theta)`, are not scope-global and
-  must remain ordinary relative-phase instructions (or be desugared to
-  equivalent controlled-phase operations).
+  are nested `QuantumCircuit` scopes, so branch-local or loop-local phases
+  remain local to those nested bodies. Modifier-bearing forms such as
+  `ctrl @ gphase(theta)`, and annotated bare forms such as `@tag gphase(theta)`,
+  are not scope-global and must remain ordinary relative-phase instructions (or
+  be desugared to equivalent controlled-phase operations).
 - When serializing, emit at most one normalized leading bare `gphase(theta);`
   per scope for the scalar `globalPhase`. Emit any remaining statement-level
   bare `gphase` instructions in their original relative order. For braced
@@ -2222,17 +2229,17 @@ parameters accept `AngleExpr`.
 A bare `qc.globalPhaseGate(theta)` normalizes directly into the circuit's
 `globalPhase` expression rather than being stored as an ordinary instruction,
 but only because this builder API is reserved for canonical foldable
-scope-global phase. Therefore `theta` must already be valid at the owning
-scope's entry under Section 2.6. A declaration-dependent or otherwise
-non-hoistable programmatic zero-qubit phase must instead remain an ordinary
-instruction, or be rejected by APIs that expose only canonical scope-global
-phase. In the canonical builder API, free symbolic `Param` leaves are treated as
-scope-entry symbols by construction; loop parameters and mutable classical
-values are not. Deserialized OpenQASM bare `gphase(theta)` that is
-non-hoistable, or simply not foldable under Section 2.6 because it is not in
-canonical leading position, must instead remain an ordinary zero-qubit
-instruction. A control-bearing form such as `ctrl @ gphase(theta)` is not
-scope-global and must be represented as an instruction (or desugared to the
+scope-global phase that is unconditional for the owning scope. Therefore `theta`
+must already be valid at the owning scope's entry under Section 2.6. A
+declaration-dependent or otherwise non-hoistable programmatic zero-qubit phase
+must instead remain an ordinary instruction, or be rejected by APIs that expose
+only canonical scope-global phase. In the canonical builder API, free symbolic
+`Param` leaves are treated as scope-entry symbols by construction; loop
+parameters and mutable classical values are not. Deserialized OpenQASM bare
+`gphase(theta)` that is non-hoistable, or simply not foldable under Section 2.6
+because it is not in canonical leading position, must instead remain an ordinary
+zero-qubit instruction. A control-bearing form such as `ctrl @ gphase(theta)` is
+not scope-global and must be represented as an instruction (or desugared to the
 exact enabled-subspace phase operator) rather than absorbed into `globalPhase`.
 The programmatic route for such an explicit statement-level phase is the
 low-level append/raw-instruction API, using an operation named `gphase` with
@@ -2935,6 +2942,8 @@ Given U = [[a, b], [c, d]], det(U) = a*d - b*c = exp(2i*alpha):
 alpha = wrapToPi(phase(det(U)) / 2)   // unique principal half-angle, so alpha ∈ (-pi/2, pi/2]
 V = exp(-i*alpha) * U   (so det(V) = 1)
 V = [[v00, v01], [v10, v11]]
+// If exact symbolic structure is available, prefer it over the numeric tests below.
+zyzBranchEps = 1e-12
 if max(|v01|, |v10|) <= zyzBranchEps:
   gamma = 0
   zeta  = phase(v11)
@@ -2951,11 +2960,12 @@ else:
   delta = wrapToPi(phase(-v01) - phase(v00))
 ```
 
-Here `zyzBranchEps` is a dedicated structural branch-classification tolerance,
-not necessarily the library-wide equality epsilon. Implementations must not
-decide the diagonal / anti-diagonal branches solely from the `arccos`-derived
-`gamma`, because floating-point roundoff near `0` or `pi` can make that test
-numerically unstable.
+Here `zyzBranchEps = 1e-12` is a dedicated structural branch-classification
+tolerance for numeric implementations, not the library-wide equality epsilon.
+Exact or symbolic implementations should use exact diagonal / anti-diagonal
+structure when available. Implementations must not decide those branches solely
+from the `arccos`-derived `gamma`, because floating-point roundoff near `0` or
+`pi` can make that test numerically unstable.
 
 These tie-break rules are mandatory so `decomposeZYZ` is deterministic and
 matches the canonical ranges from Section 2.5.
@@ -2988,8 +2998,11 @@ Then merge adjacent Rz rotations if desired, while preserving the returned
 
 - If gamma = 0 (diagonal gate): no `SX` gates are needed; return the exact phase
   and a single merged `RZ`.
-- If gamma = pi (anti-diagonal): only 1 `SX` + 2 `RZ` gates are needed, with the
-  omitted `SX` absorbed into the returned exact phase.
+- If gamma = pi (anti-diagonal): the middle `Rz(0)` may be removed, but in the
+  strict `{RZ, SX}` basis the exact sequence still requires two `SX` gates.
+  Equivalently, it may be written as `Rz(a) * X * Rz(c)` only when `X` is itself
+  an allowed basis gate. The second `SX` cannot be absorbed into the returned
+  global phase.
 
 **Two-qubit decomposition (KAK / Weyl decomposition):**
 
@@ -3079,12 +3092,17 @@ e) Iterate until no more reductions or max iterations reached.
 - **ZYZ canonicalization:** Verify returned `gamma ∈ [0, pi]`,
   `beta/delta ∈ [-pi, pi]`, `alpha = wrapToPi(phase(det(U)) / 2)` (therefore
   `alpha ∈ (-pi/2, pi/2]`), and the diagonal / anti-diagonal tie-break rules are
-  chosen from matrix-entry magnitudes (or exact symbolic structure), not solely
-  from the `arccos`-derived `gamma`, including exact boundary cases such as `-I`
-  and `-RY(pi)` and floating-point diagonal / anti-diagonal inputs.
+  chosen from exact symbolic structure when available or else the dedicated
+  `zyzBranchEps = 1e-12`, not solely from the `arccos`-derived `gamma`,
+  including exact boundary cases such as `-I` and `-RY(pi)` and floating-point
+  diagonal / anti-diagonal inputs.
 - **RZ+SX decomposition:** Decompose several single-qubit gates -> recompose
   using the returned `globalPhase` -> verify exact equality with the original
   matrix.
+- **RZ+SX anti-diagonal case:** Decompose anti-diagonal examples such as
+  `RX(pi)` and `-RY(pi)` -> verify exact equality with the original matrix, and
+  verify a strict `{RZ, SX}` lowering does not incorrectly collapse to a
+  one-`SX` form.
 - **KAK decomposition:** Decompose CX, SWAP, iSWAP, CZ, arbitrary 2-qubit
   unitary -> recompose using the returned `globalPhase` + CX + single-qubit
   gates -> verify exact equality with the original matrix.
@@ -4147,6 +4165,9 @@ Must handle all features listed above:
 - Verify a declaration-dependent or otherwise non-hoistable bare `gphase(expr);`
   remains in statement order and is not folded into the surrounding scope
   `globalPhase`.
+- Verify a branch-local or loop-local bare `gphase(expr);` is not hoisted out of
+  its nested body even when its expression is otherwise immutable and valid at
+  that nested body's entry.
 - Verify an annotated bare `@tag gphase(theta);` round-trips as a statement and
   is not folded into the surrounding scope `globalPhase`.
 - Verify `inv @ gphase(theta);` and integer `pow(2) @ gphase(theta);` normalize
