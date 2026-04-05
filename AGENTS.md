@@ -269,7 +269,8 @@ collapsing it into a neighboring named `U`.
 
 The library tracks an exact canonical scope-global phase expression
 `globalPhase` on each phase-bearing scope: `QuantumCircuit`, custom gate
-definitions, subroutine definitions, and nested control-flow bodies. Its effect
+definitions, subroutine definitions, and every nested `QuantumCircuit` body
+(including `if`/`else`, `for`, `while`, `switch`, and `box` bodies). Its effect
 is to multiply every quantum amplitude exiting that scope by
 `exp(i * globalPhase)`. For a purely unitary scope this is equivalent to
 multiplying the scope unitary by that scalar after the body acts. For scopes
@@ -283,20 +284,29 @@ that is both **hoistable** to the entry of the owning scope without changing
 semantics and **foldable** into that scope's canonical leading phase
 representation. A bare phase statement is hoistable only if it is unmodified,
 unannotated, and its expression depends only on symbols that are already in
-scope at that scope's entry and remain immutable throughout that scope. A phase
-is foldable into `globalPhase` only if it is already in the canonical
-leading-phase position for the representation being built. In particular,
-builder-origin `globalPhaseGate(θ)` is foldable by construction. For parsed
-OpenQASM 3, foldable means belonging to the maximal leading run of bare,
-unmodified, unannotated, hoistable `gphase(...)` statements in that scope: at
-top level, immediately after the `OPENQASM` line and required `include`
-directives; in a braced scope, immediately after the opening `{`. Hoistable but
-non-foldable `gphase` statements remain ordinary zero-qubit instructions in
-source order. If unresolved symbols remain, any operation that needs a concrete
-complex scalar must bind them first. For the top-level program scope, "already
-in scope at that scope's entry" means after the `OPENQASM` line and required
-`include` directives but before later declarations in that program unit.
-Therefore a top-level foldable scalar may depend on literals, built-in
+scope at that scope's entry and remain immutable throughout that scope. For this
+rule, "immutable" means the referenced binding's value cannot be changed by
+assignment, rebinding, mutation of referenced storage, or loop-index update
+anywhere during execution of that scope or its nested bodies. Literals, built-in
+constants, `const` declarations, already-bound gate/subroutine parameters, and
+read-only `input` values or read-only aliases/slices of such values count as
+immutable. Loop variables, mutable classical variables or arrays, `output`
+variables, and any binding whose referenced storage may be written in that scope
+or a reachable nested scope do not. If an implementation cannot prove that a
+referenced value is immutable for the whole scope, it must treat the phase
+statement as non-hoistable. A phase is foldable into `globalPhase` only if it is
+already in the canonical leading-phase position for the representation being
+built. In particular, builder-origin `globalPhaseGate(θ)` is foldable by
+construction. For parsed OpenQASM 3, foldable means belonging to the maximal
+leading run of bare, unmodified, unannotated, hoistable `gphase(...)` statements
+in that scope: at top level, immediately after the `OPENQASM` line and required
+`include` directives; in a braced scope, immediately after the opening `{`.
+Hoistable but non-foldable `gphase` statements remain ordinary zero-qubit
+instructions in source order. If unresolved symbols remain, any operation that
+needs a concrete complex scalar must bind them first. For the top-level program
+scope, "already in scope at that scope's entry" means after the `OPENQASM` line
+and required `include` directives but before later declarations in that program
+unit. Therefore a top-level foldable scalar may depend on literals, built-in
 constants, and names already introduced before that point (for example via
 earlier includes), but not on declarations that first appear later in the same
 source unit.
@@ -368,10 +378,14 @@ Concrete examples of this promotion:
 For **multiple positive controls**, construct the compensating phase explicitly
 as a separate operator `E_α(controls)` on the active positive-control register,
 defined in that register's MSB-first basis by `diag(1, 1, ..., 1, exp(i*α))`.
-Then construct the gate as `E_α(controls) → Controlled-V(controls, targets)`.
-This is the normative logical construction even if `E_α` is later synthesized
-into basis gates. Applying `P(α)` to just one control wire is generally
-incorrect because it also phases partially enabled control states.
+The active positive-control register is ordered exactly by the gate's control
+argument order after any negative-control normalization: the first active
+control argument is the MSB, the last is the LSB, matching the gate-matrix
+ordering convention at the start of Section 2. Then construct the gate as
+`E_α(controls) → Controlled-V(controls, targets)`. This is the normative logical
+construction even if `E_α` is later synthesized into basis gates. Applying
+`P(α)` to just one control wire is generally incorrect because it also phases
+partially enabled control states.
 
 For **negative controls**, conjugate each negative-control wire by `X` before
 and after both pieces of the construction so the enabled pattern becomes
@@ -417,22 +431,35 @@ including global phase. For circuits/scopes that contain measurement, reset, or
 classical control, passes must instead preserve branch behavior,
 measurement/collapse statistics, classical side effects, executable-statement
 ordering, and both scope-global and statement-level phase behavior exactly; they
-must not assume that one unitary exists for the whole scope:
+must not assume that one unitary exists for the whole scope. Whenever a
+decomposition extracts a factor `exp(i*α)` or `exp(i*η)`, that factor may be
+hoisted into the owning scope's `globalPhase` only when the lowered operator is
+applied unconditionally on the whole scope state. If the decomposed operator is
+being lowered only on an enabled control subspace (for example during
+`ctrl @`/`negctrl @` synthesis or inside a larger controlled template), the
+extracted phase is no longer scope-global and must instead be promoted locally
+according to Section 2.7. Transpilation must never hoist such a phase past its
+control condition:
 
 - **ZYZ decomposition:** Given a 2×2 unitary `M`, extract `α, β, γ, δ` such that
   `M = exp(i*α) * RZ(β) * RY(γ) * RZ(δ)`. Return the canonical ranges from
   Section 2.5. The phase `α` must be tracked explicitly in the returned
-  decomposition and, when lowering to instructions, added to the owning scope's
-  `globalPhase` expression (equivalently, emitted as a canonical leading
-  `globalPhaseGate(α)` that normalizes into that scalar) — not discarded or
-  silently hidden inside a neighboring named gate.
+  decomposition and, when lowering an unconditional operator to instructions,
+  added to the owning scope's `globalPhase` expression (equivalently, emitted as
+  a canonical leading `globalPhaseGate(α)` that normalizes into that scalar).
+  When the decomposition is used under control, promote `α` on the enabled
+  control subspace per Section 2.7 instead of adding it to the enclosing scope's
+  scalar. In all cases it must not be discarded or silently hidden inside a
+  neighboring named gate.
 - **RZ+SX decomposition:** The decomposition
   `M = exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` inherits phase from the ZYZ
   form. Therefore `decomposeToRzSx` must return both the instruction sequence
-  and the extra phase `η` (or emit an explicit leading `globalPhaseGate(η)`).
-  Since `SX` carries a global phase `exp(i*π/4)` relative to `RX(π/2)`, the
-  angle arithmetic and the returned `η` must account for the accumulated
-  `exp(i*π/2)` from the two `SX` gates. Verify by recomposing
+  and the extra phase `η`. When lowered unconditionally, `η` may be emitted as
+  an explicit leading `globalPhaseGate(η)`; when lowered under control, it must
+  be promoted on the enabled control subspace rather than hoisted to the
+  surrounding scope. Since `SX` carries a global phase `exp(i*π/4)` relative to
+  `RX(π/2)`, the angle arithmetic and the returned `η` must account for the
+  accumulated `exp(i*π/2)` from the two `SX` gates. Verify by recomposing
   `exp(i*η) * RZ(a) * SX * RZ(b) * SX * RZ(c)` and checking exact equality with
   the original.
 - **KAK/Weyl two-qubit decomposition:** The decomposition result must carry an
@@ -444,9 +471,11 @@ must not assume that one unitary exists for the whole scope:
 - **Gate substitution:** When replacing one gate with an equivalent sequence
   (e.g., `H` ≈ `RY(π/2) * RZ(π)` up to global phase), record the compensating
   global phase explicitly in the owning scope's `globalPhase` expression (or as
-  a canonical leading `globalPhaseGate`). Transpilation must not silently change
-  the circuit's unitary or rely on undocumented phase absorption into
-  neighboring named gates.
+  a canonical leading `globalPhaseGate`) only when the substituted operator is
+  unconditional in that scope. Under control, preserve the same phase by local
+  enabled-subspace promotion per Section 2.7 instead of hoisting it outside the
+  control condition. Transpilation must not silently change the circuit's
+  unitary or rely on undocumented phase absorption into neighboring named gates.
 
 #### 10. Serialization Phase Preservation
 
