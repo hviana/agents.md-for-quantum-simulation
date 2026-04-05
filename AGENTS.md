@@ -158,7 +158,10 @@ RV(v) = exp(-i * (vx*X + vy*Y + vz*Z) / 2)
 ```
 
 Equivalently, for a unit axis `n = (nx, ny, nz)` and an angle `θ`,
-`RV(θ*nx, θ*ny, θ*nz) = exp(-i * θ * (nx*X + ny*Y + nz*Z) / 2)`.
+`RV(θ*nx, θ*ny, θ*nz) = exp(-i * θ * (nx*X + ny*Y + nz*Z) / 2)`. For the zero
+vector, define `RV(0, 0, 0) = I` exactly. Implementations must not attempt to
+normalize `v / |v|` in that case; the matrix-exponential definition already
+fixes the result unambiguously as the identity.
 
 **This convention must not be mixed with the positive-exponent convention**
 (`exp(+iθP/2)`) anywhere in the library. Every function that accepts a rotation
@@ -285,6 +288,14 @@ For deterministic exact ZYZ decomposition of
 
 Here and throughout this section, `wrapToPi(x)` means normalization to
 `(-π, π]`, with the negative-real-axis boundary represented by `π`, not `-π`.
+This procedure is normative when `M` is available either as a concrete numeric
+unitary or in an exact symbolic form rich enough to decide the required
+determinant, magnitude, phase, and structural-branch predicates exactly. If `M`
+still contains unresolved parameters and the implementation cannot determine
+`arg(det(M))`, entry magnitudes, `arccos`, or the structural branch conditions
+exactly, it must bind those parameters before applying arbitrary-matrix ZYZ
+decomposition. Symbolic front-ends may instead decompose from exact known gate
+structure when such structure is available directly.
 
 - `γ ∈ [0, π]`
 - `β, δ ∈ [-π, π]`
@@ -518,12 +529,12 @@ Concrete examples of this promotion:
   controlled global phase: `P(γ + (φ+λ)/2)` on the control.
 
 For **multiple positive controls**, construct the compensating phase explicitly
-as a separate operator `E_α(controls)` on the active positive-control register,
-defined in that register's MSB-first basis by `diag(1, 1, ..., 1, exp(i*α))`.
-The active positive-control register is ordered exactly by the gate's control
-argument order after any negative-control normalization: the first active
-control argument is the MSB, the last is the LSB, matching the gate-matrix
-ordering convention at the start of Section 2. Then construct the gate as
+as a separate operator `E_α(controls)` on the active control register, defined
+in that register's MSB-first basis by `diag(1, 1, ..., 1, exp(i*α))`. The active
+control register is ordered exactly by the gate's control argument order after
+any negative-control normalization: the first active control argument is the
+MSB, the last is the LSB, matching the gate-matrix ordering convention at the
+start of Section 2. Then construct the gate as
 `E_α(controls) → Controlled-V(controls, targets)`. This is the normative logical
 construction even if `E_α` is later synthesized into basis gates. Applying
 `P(α)` to just one control wire is generally incorrect because it also phases
@@ -1306,7 +1317,7 @@ matrix. Together with CX, they form the universal alphabet.
 | `u1Gate(lambda)`     | U1(l)       | Equivalent to `pGate(l)`: `[[1, 0], [0, exp(i*l)]]`                                                         |
 | `u2Gate(phi, l)`     | U2(ph,l)    | Legacy library alias for `uGate(pi/2, ph, l)`: `(1/sqrt(2)) * [[1, -exp(i*l)], [exp(i*ph), exp(i*(ph+l))]]` |
 | `u3Gate(th, ph, l)`  | U3(th,ph,l) | Legacy library alias for `uGate(th, ph, l)`                                                                 |
-| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle \|v\|                                                            |
+| `rvGate(vx, vy, vz)` | RV(v)       | Rotation around axis v=(vx,vy,vz) by angle \|v\|; `RV(0,0,0) = I` exactly                                   |
 
 **RV Gate formula:** Let `angle = |v|/2`, `n = v/|v|` (unit vector). If |v| = 0,
 return identity.
@@ -3007,7 +3018,8 @@ Convert every gate to the backend's basis gates.
 
 **Single-qubit decomposition (ZYZ):**
 
-For any single-qubit unitary matrix `M`:
+For any single-qubit unitary matrix `M` with either concrete complex entries or
+exact symbolic structure sufficient to evaluate the branch conditions below:
 
 ```
 M = exp(i*alpha) * Rz(beta) * Ry(gamma) * Rz(delta)
